@@ -10,5 +10,19 @@ out/
 # Docs
 docs/
 
+# Remix compiler artifacts
+**/artifacts/
+**/artifacts/**
+
+# Remix plugin state folders
+deps/
+states/
+
+# Debug info
+*.dbg.json
+*.tsbuildinfo
+
+
 # Dotenv file
 .env
+.env.local
