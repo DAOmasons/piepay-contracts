@@ -1,0 +1,12 @@
+[submodule "lib/forge-std"]
+	path = lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "lib/allo-v2"]
+	path = lib/allo-v2
+	url = https://github.com/allo-protocol/allo-v2
+[submodule "lib/hats-protocol"]
+	path = lib/hats-protocol
+	url = https://github.com/Hats-Protocol/hats-protocol
+[submodule "lib/openzeppelin-contracts"]
+	path = lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
