@@ -5,7 +5,9 @@ pragma solidity ^0.8.19;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "forge-std/console.sol";
+
 /**
  * @title PiePay
  * @dev Manages team contributions with minute tracking and internal unit-based compensation
@@ -14,11 +16,12 @@ import "forge-std/console.sol";
  */
 contract PiePay is ReentrancyGuard {
     using SafeERC20 for IERC20;
-    IERC20 public immutable paymentUnit; // USDC contract
+    IERC20 public immutable paymentUnit; // e.g. USDC contract
 
     //ISplitMain public immutable splitMain;
     // Enums
     enum ContributionStatus {
+        None,    // Default state
         Pending,  // Submitted and awaiting review
         Approved, // Approved by project lead
         Rejected  // Rejected by project lead
@@ -78,14 +81,19 @@ contract PiePay is ReentrancyGuard {
     uint256 public constant D_TOKEN_VALUE = 1; // $1 per D-Unit
     uint256 public constant C_TOKEN_VALUE = 5; // $5 per C-Unit
     
-    // Events
+    // Whitelisting
     event ProjectInitialized(string name, string description);
     event ContributorWhitelisted(address indexed contributor);
     event ContributorRemoved(address indexed contributor);
+
+    // Contribution Reports
     event ContributionSubmitted(uint256 indexed contributionId, address indexed contributor, uint256 minutesWorked, uint8 factor);
     event ContributionReviewed(uint256 indexed contributionId, address approver, bool approved, string comment);
-    event PUnitsIssued(address indexed contributor, uint256 amount, uint256 contributionId);
+
+    // Payroll Management
     event PayrollFunded(uint256 amount);
+
+    event PUnitsIssued(address indexed contributor, uint256 amount, uint256 contributionId);
     event DistributionExecuted(uint256 indexed distributionId, uint256 pUnitsPurchased, uint256 dUnitsIssued);
     event PaymentProcessed(address indexed contributor, uint256 pUnits, uint256 dUnits, uint256 amount);
     event FundsWithdrawn(address indexed recipient, uint256 amount);
@@ -116,8 +124,6 @@ contract PiePay is ReentrancyGuard {
         address _paymentUnit
         //address _splitMainAddress
     ) {
-        
-        
         projectName = _projectName;
         projectDescription = _projectDescription;
         projectLead = _projectLead;
@@ -205,7 +211,7 @@ contract PiePay is ReentrancyGuard {
             
             // Calculate P-Units based on hours and valuation factor
             uint256 minuteRate = _getMinuteRate(contribution.valuationFactor);
-            uint256 pUnitsToIssue = contribution.minutesWorked * minuteRate;
+            uint256 pUnitsToIssue = (contribution.minutesWorked * minuteRate) ;
             
             contribution.pUnitsEarned = pUnitsToIssue;
             pUnits[contribution.contributor] += pUnitsToIssue;
@@ -233,19 +239,23 @@ contract PiePay is ReentrancyGuard {
         // Transfer USDC from payroll manager to this contract
         paymentUnit.safeTransferFrom(msg.sender, address(this), _amount);
 
-        // Convert USDC (6 decimals) to internal 18-decimal accounting
-        uint256 normalizedAmount = _amount * 1e12; // 6 -> 18 decimals
-        payrollPool += normalizedAmount;
+        // Get token decimals and convert to internal 18-decimal accounting
+        // uint8 tokenDecimals = IERC20Metadata(address(paymentUnit)).decimals();
+        // uint256 normalizedAmount = _normalizeToInternal(_amount, tokenDecimals);
+
+        payrollPool += _amount;
 
         emit PayrollFunded(_amount);
     }
     
-    function executePUnitPayout() external onlyPayrollManager nonReentrant returns (address[] memory recipients, uint32[] memory allocations) {
+    function executePUnitPayout() external onlyPayrollManager nonReentrant
+    {
 
         // sum PUnits across all contributors
         require(contributorList.length > 0, "No contributors to distribute to");
         uint256 totalPUnits = 0;
         uint256 activeContributors = 0;
+
         for (uint i = 0; i < contributorList.length; i++) {
             uint256 curPUnits = pUnits[contributorList[i]];
             totalPUnits += curPUnits;
@@ -258,86 +268,78 @@ contract PiePay is ReentrancyGuard {
         require(totalPUnits > 0, "No P-Units to distribute");
         require(payrollPool > 0, "No funds available");
 
-        // Calculate how much can be paid 
-        uint256 maxPUnitsPurchasable = payrollPool; 
-        uint256 pUnitsToPurchase = totalPUnits <= maxPUnitsPurchasable ? totalPUnits : maxPUnitsPurchasable;
-        
-        address[] memory splitsRecipients = new address[](activeContributors);
-        uint32[] memory splitsAllocations = new uint32[](activeContributors);
-        
-        uint256 index = 0;
-        
+        uint8 tokenDecimals = IERC20Metadata(address(paymentUnit)).decimals();
+        uint256 decimalMultiplier = 10 ** (18 - tokenDecimals); // e.g. for USDC's 6 decimals, divide by 10^12 to convert to 18 decimals
 
-        console.log("Total P-Units:", totalPUnits);
+        // Calculate how much can be paid 
+        uint256 maxPUnitsPurchasable = payrollPool * decimalMultiplier; 
+        uint256 pUnitsToPurchase = totalPUnits <= maxPUnitsPurchasable ? totalPUnits : maxPUnitsPurchasable;
+        uint256 totalTokenAmount = pUnitsToPurchase / decimalMultiplier; // Convert to token amount 
+
+        console.log("token balance", paymentUnit.balanceOf(address(this)));
+        console.log("totalTokenAmount", totalTokenAmount);
+
+        // Verify contract has sufficient token balance
+        require(paymentUnit.balanceOf(address(this)) >= totalTokenAmount, "Insufficient token balance");
+
+        // Track total distributed for rounding adjustment
+        uint256 totalDistributed = 0;
+        address firstActiveContributor = address(0);
+
+        console.log("maxPUnitsPurchasable:", maxPUnitsPurchasable);
+        console.log("totalPUnits:", totalPUnits);
         console.log("Active Contributors:", activeContributors);
         console.log("contributorList.length:", contributorList.length);
         console.log("Payroll Pool:", payrollPool);
+        console.log("decimalMultiplier", decimalMultiplier);
         console.log("P-Units to Purchase:", pUnitsToPurchase);
 
         // Calculate allocations and update balances
+        // Process all contributors except the first active one
         for (uint i = 0; i < contributorList.length; i++) {
-            console.log("i:", i);
             address contributor = contributorList[i];
-            console.log("Processing contributor:", contributor);
             uint256 contributorPUnits = pUnits[contributor];
-            console.log("PUnit balance:", contributorPUnits);
-            if (contributorPUnits > 0) {
-                // Calculate proportional share
-                uint256 contributorShare = (contributorPUnits * pUnitsToPurchase) / totalPUnits;
-                uint256 remainingPUnits = contributorPUnits - contributorShare;
-                console.log("contributorShare:", contributorShare);
-                console.log("remainingPUnits:", remainingPUnits);
-                // Add to split recipients if they're getting paid
-                if (contributorShare > 0) {
-                    splitsRecipients[index] = contributor;
-                    // Convert to basis points (0xSplits uses 1000000 = 100%)
-                    splitsAllocations[index] = uint32((contributorShare * 1000000) / pUnitsToPurchase);
-                    index++;
-                }
-
-                // Update balances
-                pUnits[contributor] = 0; // Reset P-Units after distribution
-                
-                // Record payment 
-                emit PaymentProcessed(contributor, contributorShare, remainingPUnits, contributorShare);
-            }
-
-                console.log("=== Completed iteration:", i);
-
-        }
-        // Fix rounding errors
-        uint256 totalAllocated = 0;
-        for (uint i = 0; i < splitsAllocations.length; i++) {
-            totalAllocated += splitsAllocations[i];
-        }
-    
-        if (totalAllocated < 1000000 && splitsAllocations.length > 0) {
             
-            console.log("Adding extra:", uint32(1000000 - totalAllocated), "to:", splitsRecipients[0]);
-            // Add the remaining allocation to the first recipient
-            splitsAllocations[0] += uint32(1000000 - totalAllocated);
+            if (contributorPUnits > 0) {
+                // Calculate proportional share in internal decimals
+                uint256 contributorShareInternal = (contributorPUnits * pUnitsToPurchase) / totalPUnits;
+                
+                // Convert to token decimals
+                uint256 contributorTokenAmount = contributorShareInternal / decimalMultiplier;
+                
+                if (firstActiveContributor == address(0)) {
+                    // This is the first active contributor - save for last
+                    firstActiveContributor = contributor;
+                } else {
+                    // Distribute to all other contributors
+                    if (contributorTokenAmount > 0) {
+                        paymentUnit.safeTransfer(contributor, contributorTokenAmount);
+                        totalDistributed += contributorTokenAmount;
+                    }
+                }
+                
+                pUnits[contributor] -= contributorShareInternal;
+                
+                emit PaymentProcessed(contributor, contributorShareInternal, 0, contributorShareInternal);
+            }
         }
 
-        console.log("splitsAllocations[0]:", splitsAllocations[0]);
-        console.log("splitsAllocations[1]:", splitsAllocations[1]);
+        // Send remaining balance to first active contributor (includes any rounding dust)
+        if (firstActiveContributor != address(0)) {
+            uint256 remainingAmount = totalTokenAmount - totalDistributed;
+            if (remainingAmount > 0) {
+                paymentUnit.safeTransfer(firstActiveContributor, remainingAmount);
+            }
+        }
 
-        return (splitsRecipients, splitsAllocations);
-        // Use splits here to send to recipients
-
-        //uint256 usdcAmount = pUnitsToPurchase / 1e12;
-        
         // Update internal accounting
-        //payrollPool -= pUnitsToPurchase;
-        // Transfer USDC to the Split contract
-        // paymentUnit.safeTransfer(split, usdcAmount);
+        payrollPool -= (pUnitsToPurchase / decimalMultiplier);
         
-
+        // Increment distribution counter and record timestamp
+        distributionCounter++;
+        distributionTimestamps[distributionCounter] = block.timestamp;
         
-        // Store the split address for this distribution
-        //distributionSplits[distributionCounter] = split;
-        
-        //emit DistributionExecuted(distributionCounter, pUnitsToPurchase, dUnitsIssued);
-        //emit SplitCreated(distributionCounter, split, usdcAmount);
+        emit DistributionExecuted(distributionCounter, pUnitsToPurchase, 0);
     }
 
     // Add this mapping to store split addresses
@@ -445,12 +447,21 @@ contract PiePay is ReentrancyGuard {
         return contributorList.length;
     }
 
-    // Helper function to convert between USDC and internal accounting
-    function _toUSDC(uint256 _internalAmount) private pure returns (uint256) {
-        return _internalAmount / 1e12; // 18 -> 6 decimals
+    // Helper function to convert token amounts to internal 18-decimal representation
+    function _normalizeToInternal(uint256 _tokenAmount, uint8 _tokenDecimals) private pure returns (uint256) {
+        if (_tokenDecimals <= 18) {
+            return _tokenAmount * (10 ** (18 - _tokenDecimals));
+        } else {
+            return _tokenAmount / (10 ** (_tokenDecimals - 18));
+        }
     }
-    
-    function _toInternal(uint256 _usdcAmount) private pure returns (uint256) {
-        return _usdcAmount * 1e12; // 6 -> 18 decimals
+
+    // Helper function to convert internal amounts back to token decimals
+    function _normalizeToToken(uint256 _internalAmount, uint8 _tokenDecimals) private pure returns (uint256) {
+        if (_tokenDecimals <= 18) {
+            return _internalAmount / (10 ** (18 - _tokenDecimals));
+        } else {
+            return _internalAmount * (10 ** (_tokenDecimals - 18));
+        }
     }
 }

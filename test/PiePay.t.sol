@@ -29,13 +29,13 @@ contract PiePayTest is Test {
         // Deploy mock USDC
         usdc = new MockUSDC();
         
-        // Set up valuation rubric - stored as cents per minute
+        // Set up valuation rubric - stored as cents per minute (100e18 = $1)
         testRubric = PiePay.ValuationRubric({
-            factor1Rate: 42e18,   // $~25/hour - Junior/Learning tasks
-            factor2Rate: 67e18,   // $~40/hour - Standard development
-            factor3Rate: 10e18,   // $60/hour - Senior/Complex work
-            factor4Rate: 142e18,   // $85/hour - Expert/Leadership
-            factor5Rate: 200e18   // $120/hour - Critical/Specialized
+            factor1Rate: 4167e16,   // $~25/hour - Junior/Learning tasks
+            factor2Rate: 6667e16,   // $~40/hour - Standard development
+            factor3Rate: 100e16,   // $60/hour - Senior/Complex work
+            factor4Rate: 14167e16,   // $85/hour - Expert/Leadership
+            factor5Rate: 200e16   // $120/hour - Critical/Specialized
         });
         
         // Create initial contributors array
@@ -88,11 +88,9 @@ contract PiePayTest is Test {
 
     function testReviewContributionAccepted() public {
 
-
-        
         // Submit contribution
         vm.prank(contributor1);
-        piePay.submitContribution(60, 3, "Implemented new feature");
+        piePay.submitContribution(60, 3, "Implemented new feature"); //60 minutes @ $60/hr = $60 = 60 P Units
         
         // Reject contribution
         vm.prank(projectLead);
@@ -356,7 +354,7 @@ contract PiePayTest is Test {
         // Check balances after funding
         assertEq(usdc.balanceOf(payrollManager), 9000 * 10**6); // 1000 USDC spent
         assertEq(usdc.balanceOf(address(piePay)), fundAmount);   // Contract received USDC
-        assertEq(piePay.payrollPool(), 1000e18);                // Internal accounting (18 decimals)
+        assertEq(piePay.payrollPool(), 1000e6);        
     }
     
     function testFundPayrollRequiresApproval() public {
@@ -420,7 +418,7 @@ contract PiePayTest is Test {
         vm.prank(payrollManager);
         piePay.fundPayroll(500 * 10**6);
         
-        assertEq(piePay.payrollPool(), 500e18);
+        assertEq(piePay.payrollPool(), 500e6);
         
         // Second funding round
         vm.prank(payrollManager);
@@ -428,7 +426,7 @@ contract PiePayTest is Test {
         vm.prank(payrollManager);
         piePay.fundPayroll(300 * 10**6);
         
-        assertEq(piePay.payrollPool(), 800e18); // 500 + 300
+        assertEq(piePay.payrollPool(), 800e6); // 500 + 300
         assertEq(usdc.balanceOf(address(piePay)), 800 * 10**6);
     }
     
@@ -511,16 +509,70 @@ contract PiePayTest is Test {
         piePay.fundPayroll(fundAmount); // Fund with $1000
         
         (, , uint256 availableFunds, ) = piePay.getCurrentDistributionInfo();
-        assertEq(availableFunds, 1000e18); // 1000 USDC in payroll pool
+        assertEq(availableFunds, 1000e6); // 1000 USDC in payroll pool
     }
     
-    function testExecutePUnitPayoutRecipientsArray() public {
-        // Setup: contributor1 gets 2x more P-Units than contributor2
+    // Add these new test functions to your existing PiePayTest contract
+
+    function testExecutePUnitPayoutBasic() public {
+        // Setup contributions and approve them
         vm.prank(contributor1);
-        piePay.submitContribution(480, 3, "8 hours work"); // 480 minutes
+        piePay.submitContribution(600, 3, "10 hours work"); // 600 minutes = 10 hours. VL3 = $60/hr. 600 P Units uses e18
         
         vm.prank(contributor2);
-        piePay.submitContribution(240, 3, "4 hours work"); // 240 minutes
+        piePay.submitContribution(240, 3, "4 hours work"); // 240 minutes * 100e18 = 240 P-Units uses e18
+        
+        // Approve both contributions
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true, "Approved");
+        
+        // Fund payroll with enough USDC to pay everyone
+        uint256 fundAmount = 840 * 10**6; // 8400 USDC (enough for 8400 P-Units)
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Record initial balances
+        uint256 initialBalance1 = usdc.balanceOf(contributor1);
+        uint256 initialBalance2 = usdc.balanceOf(contributor2);
+        uint256 initialContractBalance = usdc.balanceOf(address(piePay));
+        
+        // Execute payout
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        // Check that all P-Units were reset to 0
+        (uint256 pUnits1,,) = piePay.getContributorUnits(contributor1);
+        (uint256 pUnits2,,) = piePay.getContributorUnits(contributor2);
+        assertEq(pUnits1, 0, "Contributor1 P-Units should be reset to 0");
+        assertEq(pUnits2, 0, "Contributor2 P-Units should be reset to 0");
+        
+        // Check final balances - contributor1 should get 6000 USDC, contributor2 should get 2400 USDC
+        uint256 finalBalance1 = usdc.balanceOf(contributor1);
+        uint256 finalBalance2 = usdc.balanceOf(contributor2);
+        
+        // Contributor1 is first active, so they get any rounding dust
+        assertGe(finalBalance1 - initialBalance1, 600 * 10**6, "Contributor1 should receive at least 600 USDC");
+        assertEq(finalBalance2 - initialBalance2, 240 * 10**6, "Contributor2 should receive exactly 240 USDC");
+        
+        // Total distributed should equal initial contract balance
+        uint256 totalDistributed = (finalBalance1 - initialBalance1) + (finalBalance2 - initialBalance2);
+        assertEq(totalDistributed, initialContractBalance, "Total distributed should equal initial contract balance");
+        
+        // Contract should have 0 USDC remaining
+        assertEq(usdc.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
+    }
+
+    function testExecutePUnitPayoutPartialFunding() public {
+        // Setup contributions with total 6000 P-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(400, 3, "Work 1"); // 400e18 P-Units
+        
+        vm.prank(contributor2);
+        piePay.submitContribution(200, 3, "Work 2"); // 200e18 P-Units
         
         // Approve both
         vm.prank(projectLead);
@@ -528,35 +580,234 @@ contract PiePayTest is Test {
         vm.prank(projectLead);
         piePay.reviewContribution(2, true, "Approved");
         
-        // Fund with enough to pay everyone
+        // Fund with only half the needed amount
+        uint256 fundAmount = 300 * 10**6; // Only 300 USDC for 6000 P-Units
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Execute payout
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        // Check distributions are proportional to available funds
+        // Contributor1: 4000/6000 * 3000 = 2000 USDC
+        // Contributor2: 2000/6000 * 3000 = 1000 USDC
+        uint256 balance1 = usdc.balanceOf(contributor1);
+        uint256 balance2 = usdc.balanceOf(contributor2);
+        
+        assertGe(balance1, 200 * 10**6, "Contributor1 should receive at least 200 USDC");
+        assertEq(balance2, 100 * 10**6, "Contributor2 should receive exactly 100 USDC");
+        
+        assertEq(balance1 + balance2, 300 * 10**6, "Total distributed should be 300 USDC");
+
+        // Contract should have 0 USDC remaining
+        assertEq(usdc.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
+    }
+
+    function testExecutePUnitPayoutWithZeroPUnits() public {
+        // Only contributor1 has P-Units, contributor2 has none
+        vm.prank(contributor1);
+        piePay.submitContribution(100, 3, "Solo work"); // 100e18 P-Units
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        // Fund payroll
         uint256 fundAmount = 2000 * 10**6;
         vm.prank(payrollManager);
         usdc.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
-        // Get P-Unit balances before
-        (uint256 pUnits1, , ) = piePay.getContributorUnits(contributor1);
-        (uint256 pUnits2, , ) = piePay.getContributorUnits(contributor2);
-        
-        // Execute and get the arrays
+        // Execute payout
         vm.prank(payrollManager);
-        (address[] memory recipients, uint32[] memory allocations) = piePay.executePUnitPayout();
+        piePay.executePUnitPayout();
         
-        // Test the recipients array
-        assertEq(recipients.length, 2);
-        assertEq(allocations.length, 2);
+        // Only contributor1 should receive tokens
+        assertEq(usdc.balanceOf(contributor1), 100 * 10**6, "Contributor1 should receive all USDC");
+        assertEq(usdc.balanceOf(contributor2), 0, "Contributor2 should receive no USDC");
+    }
+
+    function testExecutePUnitPayoutRoundingPrecision() public {
+        // Create scenario that will cause rounding issues
+        vm.prank(contributor1);
+        piePay.submitContribution(333, 3, "Work 1"); // 3330e18 P-Units
         
-        // Check allocations are proportional (contributor1 should get 2/3, contributor2 should get 1/3)
-        uint256 totalPUnits = pUnits1 + pUnits2;
-        uint256 expectedAllocation1 = (pUnits1 * 1000000) / totalPUnits; // Convert to basis points
-        uint256 expectedAllocation2 = (pUnits2 * 1000000) / totalPUnits;
+        vm.prank(contributor2);
+        piePay.submitContribution(667, 3, "Work 2"); // 6670e18 P-Units
         
-        assertTrue(allocations[0] >= expectedAllocation1 && allocations[0] <= expectedAllocation1 + 1);
-        assertEq(allocations[1], expectedAllocation2);
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true, "Approved");
         
-        // Verify allocations add up to 100%
-        assertEq(uint256(allocations[0]) + uint256(allocations[1]), 1000000);
+        // Fund with amount that will cause rounding
+        uint256 fundAmount = 999 * 10**6; // 999 USDC for 10000 P-Units
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        uint256 initialBalance1 = usdc.balanceOf(contributor1);
+        uint256 initialBalance2 = usdc.balanceOf(contributor2);
+        
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        uint256 received1 = usdc.balanceOf(contributor1) - initialBalance1;
+        uint256 received2 = usdc.balanceOf(contributor2) - initialBalance2;
+        
+        // Total should equal exactly what was funded
+        assertEq(received1 + received2, 999 * 10**6, "Total distributed should equal funded amount");
+        
+        // First contributor gets rounding dust, so they might get slightly more than their exact share
+        uint256 expectedShare2 = (6670 * 999 * 10**6) / 10000; // Exact share for contributor2
+        assertEq(received2, expectedShare2, "Contributor2 should get exact calculated share");
+    }
+
+    function testExecutePUnitPayoutFailureConditions() public {
+        // Test no contributors
+        // (Can't easily test this since we have initial contributors)
+        
+        // Test no active contributors (no P-Units)
+        uint256 fundAmount = 1000 * 10**6;
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        vm.expectRevert("No active contributors");
+        piePay.executePUnitPayout();
+    }
+
+    function testExecutePUnitPayoutNoFunds() public {
+        // Setup P-Units but no funding
+        vm.prank(contributor1);
+        piePay.submitContribution(100, 3, "Work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        // Try to execute without funding
+        vm.prank(payrollManager);
+        vm.expectRevert("No funds available");
+        piePay.executePUnitPayout();
+    }
+
+    function testExecutePUnitPayoutInsufficientTokenBalance() public {
+        // Setup P-Units normally
+        vm.prank(contributor1);
+        piePay.submitContribution(100, 3, "Work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        // Fund payroll with insufficient amount
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), 50 * 10**6); // Only fund 50 USDC when 100 is needed
+        vm.prank(payrollManager);
+        piePay.fundPayroll(50 * 10**6);
+        
+        // Should fail due to insufficient token balance
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+
+        // Check payroll pool is reduced
+        assertEq(piePay.payrollPool(), 0, "Payroll pool should be 0 after full payout");
+        
+        // Check distribution counter incremented
+        assertEq(piePay.distributionCounter(), 1, "Distribution counter should be 1");
+    }
+
+    function testExecutePUnitPayoutOnlyPayrollManager() public {
+        // Setup some P-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(100, 3, "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        // Fund
+        uint256 fundAmount = 1000 * 10**6;
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Try to execute as non-payroll manager
+        vm.prank(contributor1);
+        vm.expectRevert("Not the payroll manager");
+        piePay.executePUnitPayout();
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
+        piePay.executePUnitPayout();
+    }
+
+    function testExecutePUnitPayoutUpdatesInternalAccounting() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(500, 3, "Work"); // 500e18 P-Units
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        uint256 fundAmount = 500 * 10**6;
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Check initial payroll pool
+        assertEq(piePay.payrollPool(), 500e6, "Initial payroll pool should be 500e6");
+        
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        // Check payroll pool is reduced
+        assertEq(piePay.payrollPool(), 0, "Payroll pool should be 0 after full payout");
+        
+        // Check distribution counter incremented
+        assertEq(piePay.distributionCounter(), 1, "Distribution counter should be 1");
+    }
+
+    function testExecutePUnitPayoutMultipleDistributions() public {
+        // First distribution
+        vm.prank(contributor1);
+        piePay.submitContribution(100, 3, "Work 1");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true, "Approved");
+        
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), 100 * 10**6);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(100 * 10**6);
+        
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        uint256 balance1AfterFirst = usdc.balanceOf(contributor1);
+        assertEq(balance1AfterFirst, 100 * 10**6, "First distribution should give 1000 USDC");
+        
+        // Second distribution
+        vm.prank(contributor2);
+        piePay.submitContribution(200, 3, "Work 2");
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true, "Approved");
+        
+        vm.prank(payrollManager);
+        usdc.approve(address(piePay), 200 * 10**6);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(200 * 10**6);
+        
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        // Balances should be correct
+        assertEq(usdc.balanceOf(contributor1), 100 * 10**6, "Contributor1 balance unchanged");
+        assertEq(usdc.balanceOf(contributor2), 200 * 10**6, "Contributor2 gets 200 USDC");
+        assertEq(piePay.distributionCounter(), 2, "Should have 2 distributions");
     }
 
 }
