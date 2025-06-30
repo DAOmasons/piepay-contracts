@@ -10,14 +10,14 @@ import "forge-std/console.sol";
 
 /**
  * @title PiePay
- * @dev Manages team contributions with minute tracking and internal unit-based compensation
+ * @dev Manages team contributions with internal unit-based compensation
  * Based on the Gardens/PiePay proposal for fair team payouts
  * Uses internal integer accounting instead of transferable tokens
  */
 contract PiePay is ReentrancyGuard {
     using SafeERC20 for IERC20;
     IERC20 public immutable paymentUnit; // e.g. USDC contract
-
+    uint8 paymentUnitDecimals;
     //ISplitMain public immutable splitMain;
     // Enums
     enum ContributionStatus {
@@ -29,22 +29,11 @@ contract PiePay is ReentrancyGuard {
     
     // Structs
     struct ContributionReport {
-        uint256 minutesWorked;
-        uint8 valuationFactor; // 1-5 scale
         string description;
         ContributionStatus status;
         uint256 timestamp;
         address contributor;
-        string leadComment; // Comment from project lead on approval/rejection
-        uint256 pUnitsEarned; // P-Units earned from this contribution
-    }
-    
-    struct ValuationRubric {
-        uint256 factor1Rate; // Minute rate for valuation factor 1
-        uint256 factor2Rate; // Minute rate for valuation factor 2
-        uint256 factor3Rate; // Minute rate for valuation factor 3
-        uint256 factor4Rate; // Minute rate for valuation factor 4
-        uint256 factor5Rate; // Minute rate for valuation factor 5
+        uint256 pUnitsClaimed; // P-Units claimed by contributor
     }
     
     // State Variables
@@ -73,7 +62,6 @@ contract PiePay is ReentrancyGuard {
     mapping(uint256 => uint256) public distributionTimestamps;
     
     // Project configuration
-    ValuationRubric public valuationRubric;
     uint256 public payrollPool; // Internal accounting for available funds
     
     // Constants (simple dollar values)
@@ -87,8 +75,8 @@ contract PiePay is ReentrancyGuard {
     event ContributorRemoved(address indexed contributor);
 
     // Contribution Reports
-    event ContributionSubmitted(uint256 indexed contributionId, address indexed contributor, uint256 minutesWorked, uint8 factor);
-    event ContributionReviewed(uint256 indexed contributionId, address approver, bool approved, string comment);
+    event ContributionSubmitted(uint256 indexed contributionId, address indexed contributor, string description, uint256 pUnitsClaimed);
+    event ContributionReviewed(uint256 indexed contributionId, address approver, bool approved);
 
     // Payroll Management
     event PayrollFunded(uint256 amount);
@@ -120,7 +108,6 @@ contract PiePay is ReentrancyGuard {
         address _projectLead,
         address _payrollManager,
         address[] memory _initialContributors,
-        ValuationRubric memory _valuationRubric,
         address _paymentUnit
         //address _splitMainAddress
     ) {
@@ -128,9 +115,9 @@ contract PiePay is ReentrancyGuard {
         projectDescription = _projectDescription;
         projectLead = _projectLead;
         payrollManager = _payrollManager;
-        valuationRubric = _valuationRubric;
         
         paymentUnit = IERC20(_paymentUnit);
+        paymentUnitDecimals = IERC20Metadata(address(paymentUnit)).decimals();
         //splitMain = ISplitMain(_splitMainAddress); 
 
         // Whitelist initial contributors
@@ -171,66 +158,41 @@ contract PiePay is ReentrancyGuard {
     
     // Contribution Reporting
     function submitContribution(
-        uint256 _minutesWorked,
-        uint8 _valuationFactor,
+        uint256 _pUnitsClaimed,
         string calldata _description
     ) external onlyWhitelistedContributor {
-        require(_minutesWorked > 0, "Minutes must be greater than 0");
-        require(_valuationFactor >= 1 && _valuationFactor <= 5, "Valuation factor must be 1-5");
-        
         contributionCounter++;
         
         contributions[contributionCounter] = ContributionReport({
-            minutesWorked: _minutesWorked,
-            valuationFactor: _valuationFactor,
             description: _description,
             status: ContributionStatus.Pending,
             timestamp: block.timestamp,
             contributor: msg.sender,
-            leadComment: "",
-            pUnitsEarned: 0
+            pUnitsClaimed: _pUnitsClaimed
         });
         
-        emit ContributionSubmitted(contributionCounter, msg.sender, _minutesWorked, _valuationFactor);
+        emit ContributionSubmitted(contributionCounter, msg.sender, _description, _pUnitsClaimed);
     }
     
     function reviewContribution(
         uint256 _contributionId,
-        bool _approved,
-        string calldata _comment
+        bool _approved
     ) external onlyProjectLead {
         require(_contributionId > 0 && _contributionId <= contributionCounter, "Invalid contribution ID");
         
         ContributionReport storage contribution = contributions[_contributionId];
         require(!(contribution.status == ContributionStatus.Approved), "Contribution already approved");
         
-        contribution.leadComment = _comment;
-        
         if (_approved) {
             contribution.status = ContributionStatus.Approved;
+            pUnits[contribution.contributor] += contribution.pUnitsClaimed;
             
-            // Calculate P-Units based on hours and valuation factor
-            uint256 minuteRate = _getMinuteRate(contribution.valuationFactor);
-            uint256 pUnitsToIssue = (contribution.minutesWorked * minuteRate) ;
-            
-            contribution.pUnitsEarned = pUnitsToIssue;
-            pUnits[contribution.contributor] += pUnitsToIssue;
-            
-            emit PUnitsIssued(contribution.contributor, pUnitsToIssue, _contributionId);
+            emit PUnitsIssued(contribution.contributor, contribution.pUnitsClaimed, _contributionId);
         } else {
             contribution.status = ContributionStatus.Rejected;
         }
         
-        emit ContributionReviewed(_contributionId, msg.sender, _approved, _comment);
-    }
-    
-    function _getMinuteRate(uint8 _factor) private view returns (uint256) {
-        if (_factor == 1) return valuationRubric.factor1Rate;
-        if (_factor == 2) return valuationRubric.factor2Rate;
-        if (_factor == 3) return valuationRubric.factor3Rate;
-        if (_factor == 4) return valuationRubric.factor4Rate;
-        if (_factor == 5) return valuationRubric.factor5Rate;
-        revert("Invalid valuation factor");
+        emit ContributionReviewed(_contributionId, msg.sender, _approved);
     }
     
     // Payroll Management
@@ -248,98 +210,127 @@ contract PiePay is ReentrancyGuard {
         emit PayrollFunded(_amount);
     }
     
-    function executePUnitPayout() external onlyPayrollManager nonReentrant
-    {
-
-        // sum PUnits across all contributors
+    function executePUnitPayout() external onlyPayrollManager nonReentrant {
         require(contributorList.length > 0, "No contributors to distribute to");
-        uint256 totalPUnits = 0;
-        uint256 activeContributors = 0;
+        
+        // Calculate total P-Units from active contributors
+        (uint256 totalActivePUnits, uint256 activeContributorCount) = _calculateTotalActivePUnits();
+        
+        require(activeContributorCount > 0, "No active contributors");
+        require(totalActivePUnits > 0, "No P-Units to distribute");
+        require(payrollPool > 0, "No funds available");
+        
+        // Determine how much we can actually pay out
+        uint256 maxAffordablePUnits = _normalizeToInternal(payrollPool, paymentUnitDecimals);
+        uint256 pUnitsToDistribute = totalActivePUnits <= maxAffordablePUnits 
+            ? totalActivePUnits 
+            : maxAffordablePUnits;
+        uint256 totalTokensToDistribute = _normalizeToToken(pUnitsToDistribute, paymentUnitDecimals);
+        
+        // Verify sufficient balance
+        require(paymentUnit.balanceOf(address(this)) >= totalTokensToDistribute, "Insufficient token balance");
+        
+        _logDistributionDetails(maxAffordablePUnits, totalActivePUnits, activeContributorCount, pUnitsToDistribute, totalTokensToDistribute);
+        
+        // Execute the distribution
+        uint256 totalTokensDistributed = _distributeToContributors(pUnitsToDistribute, totalActivePUnits, totalTokensToDistribute);
+        
+        // Update contract state
+        _updateContractState(totalTokensToDistribute);
+        
+        emit DistributionExecuted(distributionCounter, pUnitsToDistribute, 0);
+    }
 
+    function _calculateTotalActivePUnits() private view returns (uint256 totalPUnits, uint256 activeCount) {
         for (uint i = 0; i < contributorList.length; i++) {
-            uint256 curPUnits = pUnits[contributorList[i]];
-            totalPUnits += curPUnits;
-            if (curPUnits > 0){
-                activeContributors++; // Count active contributors
+            uint256 contributorPUnits = pUnits[contributorList[i]];
+            if (contributorPUnits > 0) {
+                totalPUnits += contributorPUnits;
+                activeCount++;
             }
         }
+    }
 
-        require(activeContributors > 0, "No active contributors");
-        require(totalPUnits > 0, "No P-Units to distribute");
-        require(payrollPool > 0, "No funds available");
-
-        uint8 tokenDecimals = IERC20Metadata(address(paymentUnit)).decimals();
-        uint256 decimalMultiplier = 10 ** (18 - tokenDecimals); // e.g. for USDC's 6 decimals, divide by 10^12 to convert to 18 decimals
-
-        // Calculate how much can be paid 
-        uint256 maxPUnitsPurchasable = payrollPool * decimalMultiplier; 
-        uint256 pUnitsToPurchase = totalPUnits <= maxPUnitsPurchasable ? totalPUnits : maxPUnitsPurchasable;
-        uint256 totalTokenAmount = pUnitsToPurchase / decimalMultiplier; // Convert to token amount 
-
-        console.log("token balance", paymentUnit.balanceOf(address(this)));
-        console.log("totalTokenAmount", totalTokenAmount);
-
-        // Verify contract has sufficient token balance
-        require(paymentUnit.balanceOf(address(this)) >= totalTokenAmount, "Insufficient token balance");
-
-        // Track total distributed for rounding adjustment
-        uint256 totalDistributed = 0;
+    function _distributeToContributors(
+        uint256 pUnitsToDistribute, 
+        uint256 totalActivePUnits, 
+        uint256 totalTokensToDistribute
+    ) private returns (uint256 totalTokensDistributed) {
         address firstActiveContributor = address(0);
-
-        console.log("maxPUnitsPurchasable:", maxPUnitsPurchasable);
-        console.log("totalPUnits:", totalPUnits);
-        console.log("Active Contributors:", activeContributors);
-        console.log("contributorList.length:", contributorList.length);
-        console.log("Payroll Pool:", payrollPool);
-        console.log("decimalMultiplier", decimalMultiplier);
-        console.log("P-Units to Purchase:", pUnitsToPurchase);
-
-        // Calculate allocations and update balances
+        uint8 tokenDecimals = paymentUnitDecimals; 
+        
         // Process all contributors except the first active one
         for (uint i = 0; i < contributorList.length; i++) {
             address contributor = contributorList[i];
             uint256 contributorPUnits = pUnits[contributor];
             
             if (contributorPUnits > 0) {
-                // Calculate proportional share in internal decimals
-                uint256 contributorShareInternal = (contributorPUnits * pUnitsToPurchase) / totalPUnits;
-                
-                // Convert to token decimals
-                uint256 contributorTokenAmount = contributorShareInternal / decimalMultiplier;
+                // Calculate this contributor's share in internal decimals
+                uint256 pUnitShareToDeduct = (contributorPUnits * pUnitsToDistribute) / totalActivePUnits;
+                uint256 tokenAmountToTransfer = _normalizeToToken(pUnitShareToDeduct, tokenDecimals);
                 
                 if (firstActiveContributor == address(0)) {
-                    // This is the first active contributor - save for last
+                    // Save first active contributor for rounding adjustment
                     firstActiveContributor = contributor;
+                    console.log("First active contributor:", firstActiveContributor);
                 } else {
                     // Distribute to all other contributors
-                    if (contributorTokenAmount > 0) {
-                        paymentUnit.safeTransfer(contributor, contributorTokenAmount);
-                        totalDistributed += contributorTokenAmount;
+                    if (tokenAmountToTransfer > 0) {
+                        paymentUnit.safeTransfer(contributor, tokenAmountToTransfer);
+                        totalTokensDistributed += tokenAmountToTransfer;
+                        
+                        console.log("Reducing P Unit balance:", pUnits[contributor], "by", pUnitShareToDeduct);
+                        pUnits[contributor] -= pUnitShareToDeduct;
+                        console.log("New P Unit balance:", pUnits[contributor]);
                     }
                 }
                 
-                pUnits[contributor] -= contributorShareInternal;
-                
-                emit PaymentProcessed(contributor, contributorShareInternal, 0, contributorShareInternal);
+                emit PaymentProcessed(contributor, pUnitShareToDeduct, 0, pUnitShareToDeduct);
             }
         }
-
-        // Send remaining balance to first active contributor (includes any rounding dust)
-        if (firstActiveContributor != address(0)) {
-            uint256 remainingAmount = totalTokenAmount - totalDistributed;
-            if (remainingAmount > 0) {
-                paymentUnit.safeTransfer(firstActiveContributor, remainingAmount);
-            }
-        }
-
-        // Update internal accounting
-        payrollPool -= (pUnitsToPurchase / decimalMultiplier);
         
-        // Increment distribution counter and record timestamp
+        // Handle first active contributor with remaining amount (includes rounding dust)
+        if (firstActiveContributor != address(0)) {
+            uint256 remainingTokenAmount = totalTokensToDistribute - totalTokensDistributed;
+            if (remainingTokenAmount > 0) {
+                console.log("Distributing remaining amount to first active contributor:", firstActiveContributor, "Amount:", remainingTokenAmount);
+                paymentUnit.safeTransfer(firstActiveContributor, remainingTokenAmount);
+                
+                // BUG FIX: Convert remaining token amount back to internal decimals before deducting
+                uint256 remainingPUnitsToDeduct = _normalizeToInternal(remainingTokenAmount, tokenDecimals);
+                console.log("Reducing P Unit balance:", pUnits[firstActiveContributor], "by", remainingPUnitsToDeduct);
+                pUnits[firstActiveContributor] -= remainingPUnitsToDeduct;
+                console.log("New P Unit balance:", pUnits[firstActiveContributor]);
+            }
+        }
+        
+        return totalTokensDistributed;
+    }
+
+    function _updateContractState(uint256 totalTokensDistributed) private {
+        payrollPool -= totalTokensDistributed;
         distributionCounter++;
         distributionTimestamps[distributionCounter] = block.timestamp;
-        
-        emit DistributionExecuted(distributionCounter, pUnitsToPurchase, 0);
+    }
+
+    function _logDistributionDetails(
+        uint256 maxAffordablePUnits, 
+        uint256 totalActivePUnits, 
+        uint256 activeContributorCount, 
+        uint256 pUnitsToDistribute,
+        uint256 totalTokensToDistribute
+    ) private view {
+        uint8 tokenDecimals = paymentUnitDecimals; 
+        console.log("token balance", paymentUnit.balanceOf(address(this)));
+        console.log("maxAffordablePUnits", maxAffordablePUnits);
+        console.log("pUnitsToDistribute", pUnitsToDistribute);
+        console.log("totalTokensToDistribute", totalTokensToDistribute);
+        console.log("totalTokenAmount", _normalizeToToken(pUnitsToDistribute, tokenDecimals));
+        console.log("totalActivePUnits:", totalActivePUnits);
+        console.log("Active Contributors:", activeContributorCount);
+        console.log("contributorList.length:", contributorList.length);
+        console.log("Payroll Pool:", payrollPool);
+        console.log("Token Decimals:", tokenDecimals);
     }
 
     // Add this mapping to store split addresses
@@ -361,11 +352,6 @@ contract PiePay is ReentrancyGuard {
         // For now, we just emit the event to track the withdrawal
     }
     
-    // Configuration Functions
-    function updateValuationRubric(ValuationRubric calldata _newRubric) external onlyProjectLead {
-        valuationRubric = _newRubric;
-    }
-    
     function setProjectLead(address _newLead) external onlyProjectLead {
         require(_newLead != address(0), "Invalid address");
         projectLead = _newLead;
@@ -374,31 +360,6 @@ contract PiePay is ReentrancyGuard {
     function setPayrollManager(address _newManager) external onlyPayrollManager {
         require(_newManager != address(0), "Invalid address");
         payrollManager = _newManager;
-    }
-    
-    // View Functions
-    function getPendingContributions() external view returns (uint256[] memory) {
-        uint256 pendingCount = 0;
-        
-        // Count pending contributions
-        for (uint i = 1; i <= contributionCounter; i++) {
-            if (contributions[i].status == ContributionStatus.Pending) {
-                pendingCount++;
-            }
-        }
-        
-        // Collect pending contribution IDs
-        uint256[] memory pendingIds = new uint256[](pendingCount);
-        uint256 index = 0;
-        
-        for (uint i = 1; i <= contributionCounter; i++) {
-            if (contributions[i].status == ContributionStatus.Pending) {
-                pendingIds[index] = i;
-                index++;
-            }
-        }
-        
-        return pendingIds;
     }
     
     function getContributorUnits(address _contributor) external view returns (
@@ -447,6 +408,10 @@ contract PiePay is ReentrancyGuard {
         return contributorList.length;
     }
 
+    function getPUnitEarned(address contributor) external view returns (uint256){
+        return pUnits[contributor];
+    }
+
     // Helper function to convert token amounts to internal 18-decimal representation
     function _normalizeToInternal(uint256 _tokenAmount, uint8 _tokenDecimals) private pure returns (uint256) {
         if (_tokenDecimals <= 18) {
@@ -464,4 +429,6 @@ contract PiePay is ReentrancyGuard {
             return _internalAmount * (10 ** (_tokenDecimals - 18));
         }
     }
+
+    
 }
