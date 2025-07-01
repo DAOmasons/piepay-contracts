@@ -4,10 +4,15 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 import "../src/PiePay.sol";
 import "./mocks/MockUSDC.sol";
+import "./mocks/MockDAI.sol";
+import "./mocks/IMintableToken.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract PiePayTest is Test {
+
+
+abstract contract PiePayTest is Test {
     PiePay public piePay;
-    MockUSDC public usdc;
+    IMintableToken public coin;
     
     address public owner;
     address public projectLead;
@@ -16,8 +21,11 @@ contract PiePayTest is Test {
     address public contributor2;
 
     event PayrollFunded(uint256 amount);
+
+    function deployCoin() internal virtual returns (IMintableToken);
+    function getCoinAmount(uint256 baseAmount) internal virtual returns (uint256);
     
-    function setUp() public {
+    function setUp() public virtual{
         owner = address(this);
         projectLead = makeAddr("projectLead");
         payrollManager = makeAddr("payrollManager");
@@ -25,7 +33,7 @@ contract PiePayTest is Test {
         contributor2 = makeAddr("contributor2");
 
         // Deploy mock USDC
-        usdc = new MockUSDC();
+         coin = deployCoin();
         
         // Create initial contributors array
         address[] memory initialContributors = new address[](2);
@@ -39,12 +47,12 @@ contract PiePayTest is Test {
             projectLead,
             payrollManager,
             initialContributors,
-            address(usdc)
+            address(coin)
             //0x2ed6c4B5dA6378c7897AC67Ba9e43102Feb694EE //SplitMain address
         );
 
         // Give payroll manager some USDC
-        usdc.mint(payrollManager, 10000 * 10**6); // 10,000 USDC
+        coin.mint(payrollManager, getCoinAmount(10000)); // 10,000 USDC
     }
     
     function testInitialSetup() public {
@@ -226,44 +234,27 @@ contract PiePayTest is Test {
             PiePay.ContributionStatus.Rejected, contributor1, 1920e18
         );
     }
-
-    function assertContribution(
-        uint256 contributionId,
-        string memory expectedDescription,
-        PiePay.ContributionStatus expectedStatus,
-        address expectedContributor,
-        uint256 expectedPUnits
-    ) internal {
-        (string memory description, 
-         PiePay.ContributionStatus status, , 
-         address contributor, uint256 pUnitsClaimed) = piePay.contributions(contributionId);
-        
-        assertEq(description, expectedDescription);
-        assertEq(uint(status), uint(expectedStatus));
-        assertEq(contributor, expectedContributor);
-        assertEq(pUnitsClaimed, expectedPUnits);
-    }
     
     function testFundPayrollWithUSDC() public {
-        uint256 fundAmount = 1000 * 10**6; // $1000 USDC (6 decimals)
+        uint256 fundAmount = getCoinAmount(1000); 
         
         // Check initial balances
-        assertEq(usdc.balanceOf(payrollManager), 10000 * 10**6);
-        assertEq(usdc.balanceOf(address(piePay)), 0);
+        assertEq(coin.balanceOf(payrollManager), getCoinAmount(10000));
+        assertEq(coin.balanceOf(address(piePay)), 0);
         assertEq(piePay.payrollPool(), 0);
         
         // Payroll manager approves  to spend USDC
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         
         // Fund payroll
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
         // Check balances after funding
-        assertEq(usdc.balanceOf(payrollManager), 9000 * 10**6); // 1000 USDC spent
-        assertEq(usdc.balanceOf(address(piePay)), fundAmount);   // Contract received USDC
-        assertEq(piePay.payrollPool(), 1000e6);        
+        assertEq(coin.balanceOf(payrollManager), getCoinAmount(9000)); // 1000 coin spent
+        assertEq(coin.balanceOf(address(piePay)), fundAmount);   // Contract received right coin
+        assertEq(piePay.payrollPool(), getCoinAmount(1000));        
     }
     
     function testFundPayrollRequiresApproval() public {
@@ -276,13 +267,13 @@ contract PiePayTest is Test {
     }
 
     function testFundPayrollOnlyPayrollManager() public {
-        uint256 fundAmount = 1000 * 10**6;
+        uint256 fundAmount = getCoinAmount(1000);
         
         // Give contributor1 some USDC and try to fund
-        usdc.mint(contributor1, fundAmount);
+        coin.mint(contributor1, fundAmount);
         
         vm.prank(contributor1);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         
         vm.prank(contributor1);
         vm.expectRevert("Not the payroll manager");
@@ -296,10 +287,10 @@ contract PiePayTest is Test {
     }
 
     function testFundPayrollInsufficientBalance() public {
-        uint256 fundAmount = 20000 * 10**6; // More than payrollManager has
+        uint256 fundAmount = getCoinAmount(20000); // More than payrollManager has
         
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         
         vm.prank(payrollManager);
         vm.expectRevert(); // ERC20 transfer will revert due to insufficient balance
@@ -307,14 +298,14 @@ contract PiePayTest is Test {
     }
 
     function testFundPayrollEmitsEvent() public {
-        uint256 fundAmount = 1000 * 10**6;
+        uint256 fundAmount = getCoinAmount(1000);
         
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         
         // Expect the event with normalized amount (18 decimals)
         vm.expectEmit(true, false, false, true);
-        emit PayrollFunded(1000e6);
+        emit PayrollFunded(getCoinAmount(1000));
         
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
@@ -323,20 +314,20 @@ contract PiePayTest is Test {
     function testMultipleFundingRounds() public {
         // First funding round
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), 500 * 10**6);
+        coin.approve(address(piePay), getCoinAmount(500));
         vm.prank(payrollManager);
-        piePay.fundPayroll(500 * 10**6);
+        piePay.fundPayroll(getCoinAmount(500));
         
-        assertEq(piePay.payrollPool(), 500e6);
+        assertEq(piePay.payrollPool(), getCoinAmount(500));
         
         // Second funding round
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), 300 * 10**6);
+        coin.approve(address(piePay), getCoinAmount(300));
         vm.prank(payrollManager);
-        piePay.fundPayroll(300 * 10**6);
+        piePay.fundPayroll(getCoinAmount(300));
         
-        assertEq(piePay.payrollPool(), 800e6); // 500 + 300
-        assertEq(usdc.balanceOf(address(piePay)), 800 * 10**6);
+        assertEq(piePay.payrollPool(), getCoinAmount(800)); // 500 + 300
+        assertEq(coin.balanceOf(address(piePay)), getCoinAmount(800));
     }
     
     function testWhitelistNewContributor() public {
@@ -381,29 +372,26 @@ contract PiePayTest is Test {
         piePay.fundPayroll(1000e18);
     }
     
-
     function testFundPayroll() public {
 
-        uint256 fundAmount = 1000 * 10**6;
+        uint256 fundAmount = getCoinAmount(1000);
 
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount); // Approve  to spend USDC
+        coin.approve(address(piePay), fundAmount); // Approve  to spend USDC
 
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount); // Fund with $1000
         
         (, , uint256 availableFunds, ) = piePay.getCurrentDistributionInfo();
-        assertEq(availableFunds, 1000e6); // 1000 USDC in payroll pool
+        assertEq(availableFunds, getCoinAmount(1000)); // 1000 USDC in payroll pool
     }
-    
-    // Add these new test functions to your existing Test contract
-
+  
     function testExecutePUnitPayoutBasic() public {
         // Setup contributions
         vm.prank(contributor1);
-        piePay.submitContribution(600e18, "10 hours work"); 
+        piePay.submitContribution(600e18, "a"); 
         vm.prank(contributor2);
-        piePay.submitContribution(240e18, "4 hours work"); 
+        piePay.submitContribution(240e18, "b"); 
         
         // Approve both contributions
         vm.prank(projectLead);
@@ -412,9 +400,9 @@ contract PiePayTest is Test {
         piePay.reviewContribution(2, true);
         
         // Fund payroll with enough USDC to pay everyone
-        uint256 fundAmount = 840 * 10**6; // 840 USDC (enough for 840 P-Units)
+        uint256 fundAmount = getCoinAmount(840);
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
 
@@ -422,9 +410,9 @@ contract PiePayTest is Test {
         // Record initial balances
         uint256 pUnits1 = piePay.pUnits(contributor1);
         uint256 pUnits2 = piePay.pUnits(contributor2);
-        uint256 initialBalance1 = usdc.balanceOf(contributor1);
-        uint256 initialBalance2 = usdc.balanceOf(contributor2);
-        uint256 initialContractBalance = usdc.balanceOf(address(piePay));
+        uint256 initialBalance1 = coin.balanceOf(contributor1);
+        uint256 initialBalance2 = coin.balanceOf(contributor2);
+        uint256 initialContractBalance = coin.balanceOf(address(piePay));
 
 
         assertEq(piePay.pUnits(contributor1), 600e18, "Contributor1 P-Units should be 600");
@@ -437,30 +425,28 @@ contract PiePayTest is Test {
         vm.prank(payrollManager);
         piePay.executePUnitPayout();
         
-        // Check that all P-Units were reset to 0
-   // Record initial balances
         uint256 finalPUnits1 = piePay.pUnits(contributor1);
         uint256 finalPUnits2 = piePay.pUnits(contributor2);
-        uint256 finalBalance1 = usdc.balanceOf(contributor1);
-        uint256 finalBalance2 = usdc.balanceOf(contributor2);
-        uint256 finalContractBalance = usdc.balanceOf(address(piePay));
+        uint256 finalBalance1 = coin.balanceOf(contributor1);
+        uint256 finalBalance2 = coin.balanceOf(contributor2);
+        uint256 finalContractBalance = coin.balanceOf(address(piePay));
         assertEq(finalPUnits1, 0, "Contributor1 P-Units should be reset to 0");
         assertEq(finalPUnits2, 0, "Contributor2 P-Units should be reset to 0");
-        assertEq(finalBalance1, 600e6, "Contributor1 balance should be 600");
-        assertEq(finalBalance2, 240e6, "Contributor2 balance should be 240");
+        assertEq(finalBalance1, getCoinAmount(600), "Contributor1 balance should be 600");
+        assertEq(finalBalance2, getCoinAmount(240), "Contributor2 balance should be 240");
         assertEq(finalContractBalance, 0, "piePay balance should be 0");
 
         
         // Contributor1 is first active, so they get any rounding dust
-        assertGe(finalBalance1 - initialBalance1, 600 * 10**6, "Contributor1 should receive at least 600 USDC");
-        assertEq(finalBalance2 - initialBalance2, 240 * 10**6, "Contributor2 should receive exactly 240 USDC");
+        assertGe(finalBalance1 - initialBalance1, getCoinAmount(600), "Contributor1 should receive at least 600 USDC");
+        assertEq(finalBalance2 - initialBalance2, getCoinAmount(240), "Contributor2 should receive exactly 240 USDC");
         
         // Total distributed should equal initial contract balance
         uint256 totalDistributed = (finalBalance1 - initialBalance1) + (finalBalance2 - initialBalance2);
         assertEq(totalDistributed, initialContractBalance, "Total distributed should equal initial contract balance");
         
         // Contract should have 0 USDC remaining
-        assertEq(usdc.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
+        assertEq(coin.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
     }
 
     function testExecutePUnitPayoutPartialFunding() public {
@@ -478,9 +464,9 @@ contract PiePayTest is Test {
         piePay.reviewContribution(2, true);
         
         // Fund with only half the needed amount
-        uint256 fundAmount = 300 * 10**6; // Only 300 USDC for 600 P-Units
+        uint256 fundAmount = getCoinAmount(300); // Only 300 USDC for 600 P-Units
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
@@ -491,11 +477,11 @@ contract PiePayTest is Test {
         // Check distributions are proportional to available funds
         // Contributor1: 400/600 * 300 = 200 USDC
         // Contributor2: 200/600 * 300 = 100 USDC
-        assertGe(usdc.balanceOf(contributor1), 200e6, "Contributor1 should receive at least 200 USDC");
-        assertEq(usdc.balanceOf(contributor2), 100e6, "Contributor2 should receive exactly 100 USDC");
+        assertGe(coin.balanceOf(contributor1), getCoinAmount(200), "Contributor1 should receive at least 200 USDC");
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(100), "Contributor2 should receive exactly 100 USDC");
 
         // Contract should have 0 USDC remaining
-        assertEq(usdc.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
+        assertEq(coin.balanceOf(address(piePay)), 0, "Contract should have 0 USDC remaining");
     }
 
     function testExecutePUnitPayoutWithZeroPUnits() public {
@@ -507,9 +493,9 @@ contract PiePayTest is Test {
         piePay.reviewContribution(1, true);
         
         // Fund payroll
-        uint256 fundAmount = 2000e6;
+        uint256 fundAmount = getCoinAmount(2000);
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
@@ -518,81 +504,83 @@ contract PiePayTest is Test {
         piePay.executePUnitPayout();
         
         // Only contributor1 should receive tokens
-        assertEq(usdc.balanceOf(contributor1), 100e6, "Contributor1 should receive all USDC");
-        assertEq(usdc.balanceOf(contributor2), 0, "Contributor2 should receive no USDC");
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(100), "Contributor1 should receive all USDC");
+        assertEq(coin.balanceOf(contributor2), 0, "Contributor2 should receive no USDC");
     }
 
     function testExecutePUnitPayoutRoundingPrecision() public {
-        // Create scenario that will cause rounding issues
-        vm.prank(contributor1);
-        piePay.submitContribution(333e18, "Work 1"); // 3330e18 P-Units
-        console.log("test:contributor1", contributor1);
-        vm.prank(contributor2);
-        piePay.submitContribution(666e18, "Work 2"); // 6670e18 P-Units
-        console.log("test:contributor2", contributor2);
+    // Create scenario that will cause rounding issues
+    vm.prank(contributor1);
+    piePay.submitContribution(333e18, "Work 1"); // 333e18 P-Units
+    console.log("test:contributor1", contributor1);
+    vm.prank(contributor2);
+    piePay.submitContribution(666e18, "Work 2"); // 666e18 P-Units
+    console.log("test:contributor2", contributor2);
 
-        vm.prank(projectLead);
-        piePay.reviewContribution(1, true);
-        vm.prank(projectLead);
-        piePay.reviewContribution(2, true);
-        
-        // Fund with amount that will cause rounding
-        uint256 fundAmount = 100e6; // 999 USDC for ~1000 P-Units
-        vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
-        vm.prank(payrollManager);
-        piePay.fundPayroll(fundAmount);
+    vm.prank(projectLead);
+    piePay.reviewContribution(1, true);
+    vm.prank(projectLead);
+    piePay.reviewContribution(2, true);
+    
+    // Fund with amount that will cause rounding
+    uint256 fundAmount = getCoinAmount(100); // 100 tokens for 999e18 P-Units
+    vm.prank(payrollManager);
+    coin.approve(address(piePay), fundAmount);
+    vm.prank(payrollManager);
+    piePay.fundPayroll(fundAmount);
 
-         // Store initial P-Unit balances
-        uint256 initialPUnits1 = piePay.pUnits(contributor1); // 333e18
-        uint256 initialPUnits2 = piePay.pUnits(contributor2); // 666e18
-        uint256 totalPUnits = initialPUnits1 + initialPUnits2; // 999e18
-        
-        vm.prank(payrollManager);
-        piePay.executePUnitPayout();
-        
-        uint256 received1 = usdc.balanceOf(contributor1);
-        uint256 received2 = usdc.balanceOf(contributor2);
-        console.log("test:received1", received1);
-        console.log("test:received2", received2);
-        
-        // Total should equal exactly what was funded
-        assertEq(received1 + received2, 100e6, "Total distributed should equal pUnit total");
+    // Store initial P-Unit balances
+    uint256 initialPUnits1 = piePay.pUnits(contributor1); // 333e18
+    uint256 initialPUnits2 = piePay.pUnits(contributor2); // 666e18
+    uint256 totalPUnits = initialPUnits1 + initialPUnits2; // 999e18
+    
+    vm.prank(payrollManager);
+    piePay.executePUnitPayout();
+    
+    uint256 received1 = coin.balanceOf(contributor1);
+    uint256 received2 = coin.balanceOf(contributor2);
+    console.log("test:received1", received1);
+    console.log("test:received2", received2);
+    
+    // Total should equal exactly what was funded
+    assertEq(received1 + received2, fundAmount, "Total distributed should equal funded amount");
 
-        // Calculate expected shares (with proper precision)
-        uint256 fundAmountInternal = 100e18; // 100 USDC converted to internal 18 decimals
-        uint256 expectedShare1Internal = (initialPUnits1 * fundAmountInternal) / totalPUnits;
-        uint256 expectedShare2Internal = (initialPUnits2 * fundAmountInternal) / totalPUnits;
-        
-        // Convert expected shares back to token amounts for verification
-        uint256 expectedReceived1 = expectedShare1Internal / 1e12; // Convert to 6 decimals
-        uint256 expectedReceived2 = expectedShare2Internal / 1e12; // Convert to 6 decimals
+    // Calculate expected shares (with proper precision)
+    uint256 fundAmountInternal = 100e18; // 100 tokens converted to internal 18 decimals
+    uint256 expectedShare1Internal = (initialPUnits1 * fundAmountInternal) / totalPUnits;
+    uint256 expectedShare2Internal = (initialPUnits2 * fundAmountInternal) / totalPUnits;
+    
+    // Get the conversion factor from internal (18 decimals) to token decimals
+    uint256 tokenDecimals = coin.decimals();
+    uint256 conversionFactor = 10**(18 - tokenDecimals);
+    
+    // Convert expected shares back to token amounts for verification
+    uint256 expectedReceived1 = expectedShare1Internal / conversionFactor;
+    uint256 expectedReceived2 = expectedShare2Internal / conversionFactor;
 
-        // Due to rounding, contributor1 gets the remaining dust
-        uint256 calculatedRemaining = fundAmount - expectedReceived2;
+    // Due to rounding, contributor1 gets the remaining dust
+    uint256 calculatedRemaining = fundAmount - expectedReceived2;
 
-        assertEq(received1, calculatedRemaining, "Contributor1 should get calculated remaining amount");
-        assertEq(received2, expectedReceived2, "Contributor2 should get exact calculated share");
+    assertEq(received1, calculatedRemaining, "Contributor1 should get calculated remaining amount");
+    assertEq(received2, expectedReceived2, "Contributor2 should get exact calculated share");
 
-        // Check P-Unit balances are reduced by the correct internal amounts
-        assertEq(piePay.pUnits(contributor1), initialPUnits1 - (calculatedRemaining * 1e12), "Contributor1 P-Units should be reduced by converted remaining amount");
-        assertEq(piePay.pUnits(contributor2), initialPUnits2 - expectedShare2Internal, "Contributor2 P-Units should be reduced by exact calculated share");
-        
-        // Verify the math checks out
-        console.log("Expected share 1 (internal):", expectedShare1Internal);
-        console.log("Expected share 2 (internal):", expectedShare2Internal);
-        console.log("Calculated remaining tokens:", calculatedRemaining);
-        console.log("Expected received 2:", expectedReceived2);
-    }
+    // Check P-Unit balances are reduced by the correct internal amounts
+    assertEq(piePay.pUnits(contributor1), initialPUnits1 - (calculatedRemaining * conversionFactor), "Contributor1 P-Units should be reduced by converted remaining amount");
+    assertEq(piePay.pUnits(contributor2), initialPUnits2 - expectedShare2Internal, "Contributor2 P-Units should be reduced by exact calculated share");
+    
+    // Verify the math checks out
+    console.log("Token decimals:", tokenDecimals);
+    console.log("Conversion factor:", conversionFactor);
+    console.log("Expected share 1 (internal):", expectedShare1Internal);
+    console.log("Expected share 2 (internal):", expectedShare2Internal);
+    console.log("Calculated remaining tokens:", calculatedRemaining);
+    console.log("Expected received 2:", expectedReceived2);
+}
     
     function testExecutePUnitPayoutFailureConditions() public {
-        // Test no contributors
-        // (Can't easily test this since we have initial contributors)
-        
-        // Test no active contributors (no P-Units)
-        uint256 fundAmount = 1000 * 10**6;
+        uint256 fundAmount = getCoinAmount(1000);
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
@@ -604,7 +592,7 @@ contract PiePayTest is Test {
     function testExecutePUnitPayoutNoFunds() public {
         // Setup P-Units but no funding
         vm.prank(contributor1);
-        piePay.submitContribution(100, "Work");
+        piePay.submitContribution(100e18, "Work");
         
         vm.prank(projectLead);
         piePay.reviewContribution(1, true);
@@ -625,9 +613,9 @@ contract PiePayTest is Test {
         
         // Fund payroll with insufficient amount
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), 50 * 10**6); // Only fund 50 USDC when 100 is needed
+        coin.approve(address(piePay), getCoinAmount(50)); // Only fund 50 USDC when 100 is needed
         vm.prank(payrollManager);
-        piePay.fundPayroll(50 * 10**6);
+        piePay.fundPayroll(getCoinAmount(50));
         
         // Should fail due to insufficient token balance
         vm.prank(payrollManager);
@@ -635,7 +623,7 @@ contract PiePayTest is Test {
 
         // Check payroll pool is reduced
         assertEq(piePay.payrollPool(), 0, "Payroll pool should be 0 after full payout");
-        assertEq(usdc.balanceOf(contributor1), 50e6, "Contributor1 should receive 50 USDC");
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(50), "Contributor1 should receive 50 USDC");
         assertEq(piePay.pUnits(contributor1), 50e18, "Contributor1 should still have 50 PUnits");
         // Check distribution counter incremented
         assertEq(piePay.distributionCounter(), 1, "Distribution counter should be 1");
@@ -649,9 +637,9 @@ contract PiePayTest is Test {
         piePay.reviewContribution(1, true);
         
         // Fund
-        uint256 fundAmount = 1000 * 10**6;
+        uint256 fundAmount = getCoinAmount(1000);
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
@@ -672,14 +660,14 @@ contract PiePayTest is Test {
         vm.prank(projectLead);
         piePay.reviewContribution(1, true);
         
-        uint256 fundAmount = 500e6;
+        uint256 fundAmount = getCoinAmount(500);
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), fundAmount);
+        coin.approve(address(piePay), fundAmount);
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount);
         
         // Check initial payroll pool
-        assertEq(piePay.payrollPool(), 500e6, "Initial payroll pool should be 500e6");
+        assertEq(piePay.payrollPool(), getCoinAmount(500), "Initial payroll pool should be 500e6");
         
         vm.prank(payrollManager);
         piePay.executePUnitPayout();
@@ -699,16 +687,16 @@ contract PiePayTest is Test {
         piePay.reviewContribution(1, true);
         
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), 50e6);
+        coin.approve(address(piePay), getCoinAmount(50));
         vm.prank(payrollManager);
-        piePay.fundPayroll(50e6);
+        piePay.fundPayroll(getCoinAmount(50));
         
         vm.prank(payrollManager);
         piePay.executePUnitPayout();
         
-        assertEq(usdc.balanceOf(contributor1), 50e6, "First distribution should give 50 USDC");
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(50), "First distribution should give 50 USDC");
         assertEq(piePay.pUnits(contributor1), 50e18, "P-Units should be 50 after payout");
-        assertEq(usdc.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
+        assertEq(coin.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
         // Second distribution
         vm.prank(contributor2);
         piePay.submitContribution(200e18, "Work 2");
@@ -716,18 +704,56 @@ contract PiePayTest is Test {
         piePay.reviewContribution(2, true);
         
         vm.prank(payrollManager);
-        usdc.approve(address(piePay), 200e6);
+        coin.approve(address(piePay), getCoinAmount(200));
         vm.prank(payrollManager);
-        piePay.fundPayroll(200e6);
+        piePay.fundPayroll(getCoinAmount(200));
         
         vm.prank(payrollManager);
         piePay.executePUnitPayout();
         
         // Balances should be correct
-        assertEq(usdc.balanceOf(contributor1), 50e6 + 40e6, "Contributor1 receives 40 USDC from second distribution");
-        assertEq(usdc.balanceOf(contributor2), 160e6, "Contributor2 gets 160 USDC");
-        assertEq(usdc.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(50) + getCoinAmount(40), "Contributor1 receives 40 USDC from second distribution");
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(160), "Contributor2 gets 160 USDC");
+        assertEq(coin.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
         assertEq(piePay.distributionCounter(), 2, "Should have 2 distributions");
     }
 
+    function assertContribution(
+        uint256 contributionId,
+        string memory expectedDescription,
+        PiePay.ContributionStatus expectedStatus,
+        address expectedContributor,
+        uint256 expectedPUnits
+    ) internal {
+        (string memory description, 
+         PiePay.ContributionStatus status, , 
+         address contributor, uint256 pUnitsClaimed) = piePay.contributions(contributionId);
+        
+        assertEq(description, expectedDescription);
+        assertEq(uint(status), uint(expectedStatus));
+        assertEq(contributor, expectedContributor);
+        assertEq(pUnitsClaimed, expectedPUnits);
+    }
+}
+
+// Concrete test for USDC
+contract PiePayUSDCTest is PiePayTest {
+    function deployCoin() internal override returns (IMintableToken) {
+        return IMintableToken(address(new MockUSDC()));
+    }
+    
+    function getCoinAmount(uint256 baseAmount) internal pure override returns (uint256) {
+        return baseAmount * 10**6; // USDC has 6 decimals
+    }
+}
+
+// Concrete test for DAI
+contract PiePayDAITest is PiePayTest {
+    function deployCoin() internal override returns (IMintableToken) {
+        return IMintableToken(address(new MockDAI()));
+    }
+    
+    function getCoinAmount(uint256 baseAmount) internal pure override returns (uint256) {
+        return baseAmount * 10**18; // DAI has 18 decimals
+    }
 }

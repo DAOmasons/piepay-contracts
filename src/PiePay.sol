@@ -276,6 +276,7 @@ contract PiePay is ReentrancyGuard {
                 } else {
                     // Distribute to all other contributors
                     if (tokenAmountToTransfer > 0) {
+                         console.log("Distributing to:", contributor, "Amount:", tokenAmountToTransfer);
                         paymentUnit.safeTransfer(contributor, tokenAmountToTransfer);
                         totalTokensDistributed += tokenAmountToTransfer;
                         
@@ -293,7 +294,7 @@ contract PiePay is ReentrancyGuard {
         if (firstActiveContributor != address(0)) {
             uint256 remainingTokenAmount = totalTokensToDistribute - totalTokensDistributed;
             if (remainingTokenAmount > 0) {
-                console.log("Distributing remaining amount to first active contributor:", firstActiveContributor, "Amount:", remainingTokenAmount);
+                console.log("Distributing remaining to:", firstActiveContributor, "Amount:", remainingTokenAmount);
                 paymentUnit.safeTransfer(firstActiveContributor, remainingTokenAmount);
                 
                 // BUG FIX: Convert remaining token amount back to internal decimals before deducting
