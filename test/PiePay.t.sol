@@ -718,6 +718,459 @@ abstract contract PiePayTest is Test {
         assertEq(piePay.distributionCounter(), 2, "Should have 2 distributions");
     }
 
+    // ============ D UNIT TESTS ============
+
+    function testGrantDUnits() public {
+        // Project lead grants D units for unpaid work
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 500e18, "Unpaid overtime work");
+        
+        // Check D unit balance
+        (,uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, 500e18, "Contributor1 should have 500 D units");
+        
+        // Check total D units across all contributors
+        (,uint256 totalDUnits,,) = piePay.getCurrentDistributionInfo();
+        assertEq(totalDUnits, 500e18, "Total D units should be 500");
+    }
+
+    function testGrantDUnitsOnlyProjectLead() public {
+        // Non-project lead tries to grant D units
+        vm.prank(payrollManager);
+        vm.expectRevert("Not the project lead");
+        piePay.grantDUnits(contributor1, 100e18, "Unauthorized grant");
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Not the project lead");
+        piePay.grantDUnits(contributor2, 100e18, "Unauthorized grant");
+    }
+
+    function testGrantDUnitsToNonWhitelistedContributor() public {
+        address outsider = makeAddr("outsider");
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.grantDUnits(outsider, 100e18, "Grant to outsider");
+    }
+
+    function testPurchaseDUnitsBasic() public {
+        uint256 paymentAmount = getCoinAmount(1000); // Pay $1000
+        uint256 multiplier = 1; // 1:1 ratio
+        
+        // Give contributor1 some tokens to purchase with
+        coin.mint(contributor1, paymentAmount);
+        
+        vm.prank(contributor1);
+        coin.approve(address(piePay), paymentAmount);
+        
+        vm.prank(contributor1);
+        piePay.purchaseDUnits(paymentAmount, multiplier);
+        
+        // Check D unit balance (should be 1000 D units for $1000 at 1x multiplier)
+        (,uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, 1000e18, "Should have 1000 D units");
+        
+        // Check contract received the payment
+        assertEq(coin.balanceOf(address(piePay)), paymentAmount, "Contract should receive payment");
+        assertEq(piePay.payrollPool(), paymentAmount, "Payment should be added to payroll pool");
+    }
+
+    function testPurchaseDUnitsWithMultiplier() public {
+        uint256 paymentAmount = getCoinAmount(500); // Pay $500
+        uint256 multiplier = 4; // 4:1 ratio
+        
+        coin.mint(contributor1, paymentAmount);
+        
+        vm.prank(contributor1);
+        coin.approve(address(piePay), paymentAmount);
+        
+        vm.prank(contributor1);
+        piePay.purchaseDUnits(paymentAmount, multiplier);
+        
+        // Check D unit balance (should be 2000 D units for $500 at 4x multiplier)
+        (,uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, 2000e18, "Should have 2000 D units (500 * 4)");
+        
+        // Contract still only receives the actual payment
+        assertEq(coin.balanceOf(address(piePay)), paymentAmount, "Contract should receive actual payment");
+        assertEq(piePay.payrollPool(), paymentAmount, "Payroll pool should reflect actual payment");
+    }
+
+    function testPurchaseDUnitsOnlyWhitelistedContributors() public {
+        address outsider = makeAddr("outsider");
+        uint256 paymentAmount = getCoinAmount(100);
+        
+        coin.mint(outsider, paymentAmount);
+        
+        vm.prank(outsider);
+        coin.approve(address(piePay), paymentAmount);
+        
+        vm.prank(outsider);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.purchaseDUnits(paymentAmount, 1);
+    }
+
+    function testExecuteDUnitPayoutBasic() public {
+        // Setup: Give contributors D units
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 600e18, "Past work");
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor2, 400e18, "Past work");
+        
+        // Fund the contract
+        uint256 fundAmount = getCoinAmount(250); // Only $250 for $1000 worth of D units
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Execute D unit payout
+        vm.prank(payrollManager);
+        piePay.executeDUnitPayout();
+        
+        // Check proportional distribution
+        // Contributor1: 600/1000 * 500 = 300 tokens
+        // Contributor2: 400/1000 * 500 = 200 tokens
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(150), "Contributor1 should get 150 tokens");
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(100), "Contributor2 should get 100 tokens");
+        
+        // Check D units are reduced (buyback)
+        (,uint256 dUnits1,) = piePay.getContributorUnits(contributor1);
+        (,uint256 dUnits2,) = piePay.getContributorUnits(contributor2);
+        assertEq(dUnits1, 450e18, "Contributor1 should have 300 D units remaining");
+        assertEq(dUnits2, 300e18, "Contributor2 should have 200 D units remaining");
+        
+        // Check payroll pool is depleted
+        assertEq(piePay.payrollPool(), 0, "Payroll pool should be empty");
+    }
+
+    function testExecuteDUnitPayoutNoFunds() public {
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 100e18, "Work");
+        
+        vm.prank(payrollManager);
+        vm.expectRevert("No funds available");
+        piePay.executeDUnitPayout();
+    }
+
+    function testExecuteDUnitPayoutNoDUnits() public {
+        // Fund but no D units exist
+        uint256 fundAmount = getCoinAmount(1000);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        vm.expectRevert("No active D-Unit holders");
+        piePay.executeDUnitPayout();
+    }
+
+    function testExecuteDUnitPayoutOnlyPayrollManager() public {
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 100e18, "Work");
+        
+        uint256 fundAmount = getCoinAmount(100);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Not the payroll manager");
+        piePay.executeDUnitPayout();
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
+        piePay.executeDUnitPayout();
+    }
+
+    function testConvertPUnitsToDebtBasic() public {
+        // Setup P units
+        vm.prank(contributor1);
+        piePay.submitContribution(500e18, "Work1");
+        vm.prank(contributor2);
+        piePay.submitContribution(300e18, "Work2");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        // Convert P units to D units with 2x multiplier
+        address[] memory contributors = new address[](2);
+        contributors[0] = contributor1;
+        contributors[1] = contributor2;
+        
+        vm.prank(payrollManager);
+        piePay.convertAllPUnitsToDebt(contributors, 2);
+        
+        // Check P units are zeroed
+        assertEq(piePay.pUnits(contributor1), 0, "P units should be 0");
+        assertEq(piePay.pUnits(contributor2), 0, "P units should be 0");
+        
+        // Check D units are created with multiplier
+        (,uint256 dUnits1,) = piePay.getContributorUnits(contributor1);
+        (,uint256 dUnits2,) = piePay.getContributorUnits(contributor2);
+        assertEq(dUnits1, 1000e18, "Should have 1000 D units (500 * 2)");
+        assertEq(dUnits2, 600e18, "Should have 600 D units (300 * 2)");
+    }
+
+    function testConvertPUnitsToDebtOnlyPayrollManager() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(100e18, "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        address[] memory contributors = new address[](1);
+        contributors[0] = contributor1;
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Not the payroll manager");
+        piePay.convertAllPUnitsToDebt(contributors, 1);
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
+        piePay.convertAllPUnitsToDebt(contributors, 1);
+    }
+
+    // Add these test functions to your PiePayTest abstract contract:
+
+    function testExecutePUnitPayoutAmountPartial() public {
+        // Setup P-Units: contributor1=600, contributor2=240
+        vm.prank(contributor1);
+        piePay.submitContribution(600e18, "Work 1");
+        vm.prank(contributor2);
+        piePay.submitContribution(240e18, "Work 2");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        // Fund with $1000
+        uint256 fundAmount = getCoinAmount(1000);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Distribute only $420 (half of the P-Units)
+        uint256 distributionAmount = getCoinAmount(420);
+        vm.prank(payrollManager);
+        piePay.executePUnitPayoutAmount(distributionAmount);
+        
+        // Check proportional distribution: 420/840 = 50%
+        // Contributor1: 600 * 0.5 = 300 USDC received, 300 P-Units remaining
+        // Contributor2: 240 * 0.5 = 120 USDC received, 120 P-Units remaining
+        assertGe(coin.balanceOf(contributor1), getCoinAmount(300), "Contributor1 should receive at least 300 USDC");
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(120), "Contributor2 should receive exactly 120 USDC");
+        
+        assertEq(piePay.pUnits(contributor1), 300e18, "Contributor1 should have 300 P-Units remaining");
+        assertEq(piePay.pUnits(contributor2), 120e18, "Contributor2 should have 120 P-Units remaining");
+        
+        // Payroll pool should have $580 remaining
+        assertEq(piePay.payrollPool(), getCoinAmount(580), "Should have $580 remaining");
+    }
+
+    function testExecutePUnitPayoutAmountExceedsAvailable() public {
+        // Setup minimal P-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(100e18, "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        // Fund with $500
+        uint256 fundAmount = getCoinAmount(500);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Try to distribute $1000 when only $500 available
+        vm.prank(payrollManager);
+        vm.expectRevert("Distribution amount exceeds available funds");
+        piePay.executePUnitPayoutAmount(getCoinAmount(1000));
+    }
+
+    function testExecutePUnitPayoutAmountZero() public {
+        // Setup and fund
+        vm.prank(contributor1);
+        piePay.submitContribution(100e18, "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(100);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Try to distribute zero amount
+        vm.prank(payrollManager);
+        vm.expectRevert("Distribution amount must be greater than 0");
+        piePay.executePUnitPayoutAmount(0);
+    }
+
+    function testExecuteDUnitPayoutAmountPartial() public {
+        // Setup D-Units
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 600e18, "Unpaid work 1");
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor2, 400e18, "Unpaid work 2");
+        
+        // Fund with $1000
+        uint256 fundAmount = getCoinAmount(1000);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Distribute only $500 (half of the D-Units)
+        uint256 distributionAmount = getCoinAmount(500);
+        vm.prank(payrollManager);
+        piePay.executeDUnitPayoutAmount(distributionAmount);
+        
+        // Check proportional distribution: 500/1000 = 50%
+        // Contributor1: 600 * 0.5 = 300 USDC received, 300 D-Units remaining
+        // Contributor2: 400 * 0.5 = 200 USDC received, 200 D-Units remaining
+        assertGe(coin.balanceOf(contributor1), getCoinAmount(300), "Contributor1 should receive at least 300 USDC");
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(200), "Contributor2 should receive exactly 200 USDC");
+        
+        assertEq(piePay.dUnits(contributor1), 300e18, "Contributor1 should have 300 D-Units remaining");
+        assertEq(piePay.dUnits(contributor2), 200e18, "Contributor2 should have 200 D-Units remaining");
+        
+        // Payroll pool should have $500 remaining
+        assertEq(piePay.payrollPool(), getCoinAmount(500), "Should have $500 remaining");
+    }
+
+    function testExecuteDUnitPayoutAmountExceedsAvailable() public {
+        // Setup D-Units
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 100e18, "Work");
+        
+        // Fund with $200
+        uint256 fundAmount = getCoinAmount(200);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Try to distribute $500 when only $200 available
+        vm.prank(payrollManager);
+        vm.expectRevert("Distribution amount exceeds available funds");
+        piePay.executeDUnitPayoutAmount(getCoinAmount(500));
+    }
+
+    function testBackwardCompatibilityPUnits() public {
+        // Setup P-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(300e18, "Work 1");
+        vm.prank(contributor2);
+        piePay.submitContribution(200e18, "Work 2");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        // Fund with enough to pay all P-Units
+        uint256 fundAmount = getCoinAmount(600);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Test that original function works the same as type(uint256).max
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        // All P-Units should be cleared
+        assertEq(piePay.pUnits(contributor1), 0, "All P-Units should be cleared");
+        assertEq(piePay.pUnits(contributor2), 0, "All P-Units should be cleared");
+        
+        // All funds distributed
+        uint256 totalReceived = coin.balanceOf(contributor1) + coin.balanceOf(contributor2);
+        assertEq(totalReceived, getCoinAmount(500), "Should distribute exactly $500 (total P-Units)");
+        
+        // Should have $100 remaining since we only needed $500 for P-Units
+        assertEq(piePay.payrollPool(), getCoinAmount(100), "Should have $100 remaining");
+    }
+
+    function testBackwardCompatibilityDUnits() public {
+        // Setup D-Units
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor1, 150e18, "Work 1");
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor2, 100e18, "Work 2");
+        
+        // Fund with more than needed
+        uint256 fundAmount = getCoinAmount(400);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Test that original function works the same as type(uint256).max
+        vm.prank(payrollManager);
+        piePay.executeDUnitPayout();
+        
+        // All D-Units should be cleared
+        assertEq(piePay.dUnits(contributor1), 0, "All D-Units should be cleared");
+        assertEq(piePay.dUnits(contributor2), 0, "All D-Units should be cleared");
+        
+        // Should distribute exactly $250 (total D-Units)
+        uint256 totalReceived = coin.balanceOf(contributor1) + coin.balanceOf(contributor2);
+        assertEq(totalReceived, getCoinAmount(250), "Should distribute exactly $250 (total D-Units)");
+        
+        // Should have $150 remaining since we only needed $250 for D-Units
+        assertEq(piePay.payrollPool(), getCoinAmount(150), "Should have $150 remaining");
+    }
+
+    function testMixedPayoutWorkflow() public {
+        // Setup both P-Units and D-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(300e18, "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(projectLead);
+        piePay.grantDUnits(contributor2, 200e18, "D-Unit work");
+        
+        // Fund with $1000
+        uint256 fundAmount = getCoinAmount(1000);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Pay $150 of P-Units first (half)
+        vm.prank(payrollManager);
+        piePay.executePUnitPayoutAmount(getCoinAmount(150));
+        
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(150), "Contributor1 gets $150 from P-Units");
+        assertEq(piePay.pUnits(contributor1), 150e18, "Contributor1 has 150 P-Units remaining");
+        assertEq(piePay.payrollPool(), getCoinAmount(850), "Should have $850 remaining");
+        
+        // Pay $100 of D-Units (half)
+        vm.prank(payrollManager);
+        piePay.executeDUnitPayoutAmount(getCoinAmount(100));
+        
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(100), "Contributor2 gets $100 from D-Units");
+        assertEq(piePay.dUnits(contributor2), 100e18, "Contributor2 has 100 D-Units remaining");
+        assertEq(piePay.payrollPool(), getCoinAmount(750), "Should have $750 remaining");
+        
+        // Pay remaining P-Units with max value
+        vm.prank(payrollManager);
+        piePay.executePUnitPayoutAmount(type(uint256).max);
+        
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(300), "Contributor1 should have total $300");
+        assertEq(piePay.pUnits(contributor1), 0, "All P-Units should be cleared");
+        assertEq(piePay.payrollPool(), getCoinAmount(600), "Should have $600 remaining");
+    }
+
+
+
     function assertContribution(
         uint256 contributionId,
         string memory expectedDescription,
@@ -734,6 +1187,11 @@ abstract contract PiePayTest is Test {
         assertEq(contributor, expectedContributor);
         assertEq(pUnitsClaimed, expectedPUnits);
     }
+
+
+
+
+
 }
 
 // Concrete test for USDC
@@ -757,3 +1215,4 @@ contract PiePayDAITest is PiePayTest {
         return baseAmount * 10**18; // DAI has 18 decimals
     }
 }
+
