@@ -69,8 +69,7 @@ abstract contract PiePayTest is Test {
         vm.prank(contributor1);
         piePay.submitContribution(500, "Implemented new feature");
         
-        (string memory description, PiePay.ContributionStatus status, uint256 timestamp, 
-         address contributor, uint256 pUnitsClaimed) = 
+        (address contributor, uint256 pUnitsClaimed, PiePay.ContributionStatus status, string memory description) = 
          piePay.contributions(1);
         assertEq(description, "Implemented new feature");
         assertEq(uint(status), uint(PiePay.ContributionStatus.Pending));
@@ -89,7 +88,7 @@ abstract contract PiePayTest is Test {
         piePay.reviewContribution(1, true);
 
         // Check contribution status
-        (,PiePay.ContributionStatus status, , ,uint256 pUnitsClaimed) = 
+        (,uint256 pUnitsClaimed, PiePay.ContributionStatus status,) = 
          piePay.contributions(1);
         
         assertEq(uint(status), uint(PiePay.ContributionStatus.Approved));
@@ -110,7 +109,7 @@ abstract contract PiePayTest is Test {
         piePay.reviewContribution(1, false);
         
         // Check contribution status
-        (,PiePay.ContributionStatus status, , ,uint256 pUnitsClaimed) = 
+        (,uint256 pUnitsClaimed, PiePay.ContributionStatus status, ) = 
          piePay.contributions(1);
         
         assertEq(uint(status), uint(PiePay.ContributionStatus.Rejected));
@@ -1178,9 +1177,7 @@ abstract contract PiePayTest is Test {
         address expectedContributor,
         uint256 expectedPUnits
     ) internal {
-        (string memory description, 
-         PiePay.ContributionStatus status, , 
-         address contributor, uint256 pUnitsClaimed) = piePay.contributions(contributionId);
+        (address contributor, uint256 pUnitsClaimed, PiePay.ContributionStatus status, string memory description) = piePay.contributions(contributionId);
         
         assertEq(description, expectedDescription);
         assertEq(uint(status), uint(expectedStatus));

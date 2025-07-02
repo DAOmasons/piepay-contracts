@@ -11,14 +11,13 @@ import "forge-std/console.sol";
 /**
  * @title PiePay
  * @dev Manages team contributions with internal unit-based compensation
- * Based on the Gardens/PiePay proposal for fair team payouts
  * Uses internal integer accounting instead of transferable tokens
  */
 contract PiePay is ReentrancyGuard {
     using SafeERC20 for IERC20;
     IERC20 public immutable paymentUnit; // e.g. USDC contract
     uint8 paymentUnitDecimals;
-    //ISplitMain public immutable splitMain;
+
     // Enums
     enum ContributionStatus {
         None,    // Default state
@@ -29,11 +28,10 @@ contract PiePay is ReentrancyGuard {
     
     // Structs
     struct ContributionReport {
-        string description;
-        ContributionStatus status;
-        uint256 timestamp;
         address contributor;
         uint256 pUnitsClaimed; // P-Units claimed by contributor
+        ContributionStatus status;
+        string description;
     }
     
     // State Variables
@@ -170,11 +168,10 @@ contract PiePay is ReentrancyGuard {
         contributionCounter++;
         
         contributions[contributionCounter] = ContributionReport({
-            description: _description,
-            status: ContributionStatus.Pending,
-            timestamp: block.timestamp,
             contributor: msg.sender,
-            pUnitsClaimed: _pUnitsClaimed
+            pUnitsClaimed: _pUnitsClaimed,
+            status: ContributionStatus.Pending,
+            description: _description
         });
         
         emit ContributionSubmitted(contributionCounter, msg.sender, _description, _pUnitsClaimed);
