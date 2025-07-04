@@ -6,7 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import "forge-std/console.sol";
+import "lib/forge-std/src/console.sol";
 
 /**
  * @title PiePay
@@ -14,9 +14,17 @@ import "forge-std/console.sol";
  * Based on the Gardens/PiePay proposal for fair team payouts
  * Uses internal integer accounting instead of transferable tokens
  */
+
+// Note: We still need D&C Unit distros 
+// Note: We still need conversion functions 
 contract PiePay is ReentrancyGuard {
     using SafeERC20 for IERC20;
+
+    // Note: If we're going to save the token Interface here (which is good), 
+    // can we not reference this contract for decimals? I think we could avoid the decimal hell found below
+    // Note: I would rename to payment token
     IERC20 public immutable paymentUnit; // e.g. USDC contract
+
     uint8 paymentUnitDecimals;
     //ISplitMain public immutable splitMain;
     // Enums
@@ -36,7 +44,7 @@ contract PiePay is ReentrancyGuard {
         uint256 pUnitsClaimed; // P-Units claimed by contributor
     }
     
-    // State Variables
+    //Note: No need to save these to global state, they can 
     string public projectName;
     string public projectDescription;
     
@@ -57,6 +65,7 @@ contract PiePay is ReentrancyGuard {
     mapping(uint256 => ContributionReport) public contributions;
     uint256 public contributionCounter;
     
+    // Note: I don't think we need to track distributions. 
     // Distribution tracking
     uint256 public distributionCounter;
     mapping(uint256 => uint256) public distributionTimestamps;
@@ -65,6 +74,8 @@ contract PiePay is ReentrancyGuard {
     uint256 public payrollPool; // Internal accounting for available funds
     
     // Constants (simple dollar values)
+    // Note: These should be parameters
+    // Note: These aren't yet converting 
     uint256 public constant P_TOKEN_VALUE = 1; // $1 per P-Unit
     uint256 public constant D_TOKEN_VALUE = 1; // $1 per D-Unit
     uint256 public constant C_TOKEN_VALUE = 5; // $5 per C-Unit
@@ -109,7 +120,6 @@ contract PiePay is ReentrancyGuard {
         address _payrollManager,
         address[] memory _initialContributors,
         address _paymentUnit
-        //address _splitMainAddress
     ) {
         projectName = _projectName;
         projectDescription = _projectDescription;
@@ -118,13 +128,13 @@ contract PiePay is ReentrancyGuard {
         
         paymentUnit = IERC20(_paymentUnit);
         paymentUnitDecimals = IERC20Metadata(address(paymentUnit)).decimals();
-        //splitMain = ISplitMain(_splitMainAddress); 
 
         // Whitelist initial contributors
         for (uint i = 0; i < _initialContributors.length; i++) {
             _whitelistContributor(_initialContributors[i]);
         }
-        
+
+        //Note: indexer should be able to see the payment token and other parameters (once added)
         emit ProjectInitialized(_projectName, _projectDescription);
     }
     
@@ -139,7 +149,14 @@ contract PiePay is ReentrancyGuard {
         contributorList.push(_contributor);
         emit ContributorWhitelisted(_contributor);
     }
-    
+
+
+
+    // Note: Interesting issue here: 
+    // If we remove a contributor from the list, does that mean they can no longer be paid? 
+    // Is that what we would want? In my mind, we would want ex-listed contributors to not be able to 
+    // post a contribution. But we would still want them to be rewarded for their efforts. 
+    // Something to think about. 
     function removeContributor(address _contributor) external onlyProjectLead {
         require(whitelistedContributors[_contributor], "Not whitelisted");
         whitelistedContributors[_contributor] = false;
@@ -148,6 +165,8 @@ contract PiePay is ReentrancyGuard {
         for (uint i = 0; i < contributorList.length; i++) {
             if (contributorList[i] == _contributor) {
                 contributorList[i] = contributorList[contributorList.length - 1];
+
+                // Note: Would this not cause that last contributor in the list to be overwritten? 
                 contributorList.pop();
                 break;
             }
@@ -205,11 +224,17 @@ contract PiePay is ReentrancyGuard {
         // uint8 tokenDecimals = IERC20Metadata(address(paymentUnit)).decimals();
         // uint256 normalizedAmount = _normalizeToInternal(_amount, tokenDecimals);
 
+
+        // I wonder if we can avoid saving a pool variable and just look up token.balanceOf(this)
         payrollPool += _amount;
 
         emit PayrollFunded(_amount);
     }
     
+
+    // Note: Wasn't this supposed to parametized so that we could use it for other tokens? 
+    // Note: How do we catch overflow? 
+    // Note: How are debt and capital units handled?
     function executePUnitPayout() external onlyPayrollManager nonReentrant {
         require(contributorList.length > 0, "No contributors to distribute to");
         
@@ -228,12 +253,14 @@ contract PiePay is ReentrancyGuard {
         uint256 totalTokensToDistribute = _normalizeToToken(pUnitsToDistribute, paymentUnitDecimals);
         
         // Verify sufficient balance
+
+        // Note: Will this check work if we're adjusting the decimal amounts?
         require(paymentUnit.balanceOf(address(this)) >= totalTokensToDistribute, "Insufficient token balance");
         
         _logDistributionDetails(maxAffordablePUnits, totalActivePUnits, activeContributorCount, pUnitsToDistribute, totalTokensToDistribute);
         
         // Execute the distribution
-        uint256 totalTokensDistributed = _distributeToContributors(pUnitsToDistribute, totalActivePUnits, totalTokensToDistribute);
+        _distributeToContributors(pUnitsToDistribute, totalActivePUnits, totalTokensToDistribute);
         
         // Update contract state
         _updateContractState(totalTokensToDistribute);
@@ -241,6 +268,7 @@ contract PiePay is ReentrancyGuard {
         emit DistributionExecuted(distributionCounter, pUnitsToDistribute, 0);
     }
 
+    // Note: We should probably save this is a variable instead of calculating it every time
     function _calculateTotalActivePUnits() private view returns (uint256 totalPUnits, uint256 activeCount) {
         for (uint i = 0; i < contributorList.length; i++) {
             uint256 contributorPUnits = pUnits[contributorList[i]];
@@ -270,6 +298,7 @@ contract PiePay is ReentrancyGuard {
                 uint256 tokenAmountToTransfer = _normalizeToToken(pUnitShareToDeduct, tokenDecimals);
                 
                 if (firstActiveContributor == address(0)) {
+                    // Note: Will need to understand this a bit. s this to hold extra funds for rounding adjustments?
                     // Save first active contributor for rounding adjustment
                     firstActiveContributor = contributor;
                     console.log("First active contributor:", firstActiveContributor);
@@ -308,12 +337,16 @@ contract PiePay is ReentrancyGuard {
         return totalTokensDistributed;
     }
 
+
+    // Note: Do we need to do any of this. Updating the pool amount seems good. But the rest?
     function _updateContractState(uint256 totalTokensDistributed) private {
         payrollPool -= totalTokensDistributed;
         distributionCounter++;
         distributionTimestamps[distributionCounter] = block.timestamp;
     }
 
+
+    // Note: I imagine this is for debugging purposes
     function _logDistributionDetails(
         uint256 maxAffordablePUnits, 
         uint256 totalActivePUnits, 
@@ -334,10 +367,12 @@ contract PiePay is ReentrancyGuard {
         console.log("Token Decimals:", tokenDecimals);
     }
 
+    //Note: State should be stored at the top of the contract 
     // Add this mapping to store split addresses
     mapping(uint256 => address) public distributionSplits;
 
     // Add this event
+    // Note: What's up with this?
     event SplitCreated(uint256 indexed distributionId, address indexed split, uint256 usdcAmount);
     
     // Administrative Functions
@@ -351,6 +386,8 @@ contract PiePay is ReentrancyGuard {
         
         // In a real implementation, this would transfer actual funds to the recipient
         // For now, we just emit the event to track the withdrawal
+
+        // Note: Why not just transfer now?
     }
     
     function setProjectLead(address _newLead) external onlyProjectLead {
@@ -370,7 +407,9 @@ contract PiePay is ReentrancyGuard {
     ) {
         return (pUnits[_contributor], dUnits[_contributor], cUnits[_contributor]);
     }
-    
+
+
+    // Note: If this isn't being used in the contract or for testing, we can remove it. The indexer will handle this. 
     function getCurrentDistributionInfo() external view returns (
         uint256 totalPUnits,
         uint256 totalDUnits,
@@ -391,7 +430,9 @@ contract PiePay is ReentrancyGuard {
             distributionCounter > 0 ? distributionTimestamps[distributionCounter] : 0
         );
     }
-    
+
+
+    // Note: If this isn't being used in the contract or for testing, we can remove it. The indexer will handle this. 
     function getTotalUnitDistribution() external view returns (
         uint256 totalPUnits,
         uint256 totalDUnits,
@@ -413,6 +454,8 @@ contract PiePay is ReentrancyGuard {
         return pUnits[contributor];
     }
 
+
+    // Note: trying to understand what this is for. Why do we need to normalize the decimals?
     // Helper function to convert token amounts to internal 18-decimal representation
     function _normalizeToInternal(uint256 _tokenAmount, uint8 _tokenDecimals) private pure returns (uint256) {
         if (_tokenDecimals <= 18) {
@@ -430,6 +473,4 @@ contract PiePay is ReentrancyGuard {
             return _internalAmount * (10 ** (_tokenDecimals - 18));
         }
     }
-
-    
 }
