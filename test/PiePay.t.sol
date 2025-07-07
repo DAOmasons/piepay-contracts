@@ -721,7 +721,7 @@ abstract contract PiePayTest is Test {
 
     function testGrantDUnits() public {
         // Project lead grants D units for unpaid work
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 500e18, "Unpaid overtime work");
         
         // Check D unit balance
@@ -733,21 +733,21 @@ abstract contract PiePayTest is Test {
         assertEq(totalDUnits, 500e18, "Total D units should be 500");
     }
 
-    function testGrantDUnitsOnlyProjectLead() public {
+    function testGrantDUnitsOnlyPayrollManager() public {
         // Non-project lead tries to grant D units
-        vm.prank(payrollManager);
-        vm.expectRevert("Not the project lead");
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
         piePay.grantDUnits(contributor1, 100e18, "Unauthorized grant");
         
-        vm.prank(contributor1);
-        vm.expectRevert("Not the project lead");
-        piePay.grantDUnits(contributor2, 100e18, "Unauthorized grant");
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
+        piePay.grantDUnits(contributor2, 1, "Unauthorized grant");
     }
 
     function testGrantDUnitsToNonWhitelistedContributor() public {
         address outsider = makeAddr("outsider");
         
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         vm.expectRevert("Not a whitelisted contributor");
         piePay.grantDUnits(outsider, 100e18, "Grant to outsider");
     }
@@ -811,9 +811,9 @@ abstract contract PiePayTest is Test {
 
     function testExecuteDUnitPayoutBasic() public {
         // Setup: Give contributors D units
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 600e18, "Past work");
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor2, 400e18, "Past work");
         
         // Fund the contract
@@ -844,7 +844,7 @@ abstract contract PiePayTest is Test {
     }
 
     function testExecuteDUnitPayoutNoFunds() public {
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 100e18, "Work");
         
         vm.prank(payrollManager);
@@ -866,7 +866,7 @@ abstract contract PiePayTest is Test {
     }
 
     function testExecuteDUnitPayoutOnlyPayrollManager() public {
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 100e18, "Work");
         
         uint256 fundAmount = getCoinAmount(100);
@@ -1013,9 +1013,9 @@ abstract contract PiePayTest is Test {
 
     function testExecuteDUnitPayoutAmountPartial() public {
         // Setup D-Units
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 600e18, "Unpaid work 1");
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor2, 400e18, "Unpaid work 2");
         
         // Fund with $1000
@@ -1045,7 +1045,7 @@ abstract contract PiePayTest is Test {
 
     function testExecuteDUnitPayoutAmountExceedsAvailable() public {
         // Setup D-Units
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 100e18, "Work");
         
         // Fund with $200
@@ -1098,9 +1098,9 @@ abstract contract PiePayTest is Test {
 
     function testBackwardCompatibilityDUnits() public {
         // Setup D-Units
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor1, 150e18, "Work 1");
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor2, 100e18, "Work 2");
         
         // Fund with more than needed
@@ -1133,7 +1133,7 @@ abstract contract PiePayTest is Test {
         vm.prank(projectLead);
         piePay.reviewContribution(1, true);
         
-        vm.prank(projectLead);
+        vm.prank(payrollManager);
         piePay.grantDUnits(contributor2, 200e18, "D-Unit work");
         
         // Fund with $1000

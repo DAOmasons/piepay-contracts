@@ -208,7 +208,7 @@ contract PiePay is ReentrancyGuard {
         address contributor, 
         uint256 amount, 
         string calldata reason
-    ) external onlyProjectLead {
+    ) external onlyPayrollManager() {
         require(whitelistedContributors[contributor], "Not a whitelisted contributor");
         require(amount > 0, "Amount must be greater than 0");
         require(bytes(reason).length > 0, "Reason cannot be empty");
