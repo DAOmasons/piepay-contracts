@@ -55,10 +55,6 @@ contract PiePay is ReentrancyGuard {
     mapping(uint256 => ContributionReport) public contributions;
     uint256 public contributionCounter;
     
-    // Distribution tracking
-    uint256 public distributionCounter;
-    mapping(uint256 => uint256) public distributionTimestamps;
-    
     // Project configuration
     uint256 public payrollPool; // Internal accounting for available funds
     
@@ -80,7 +76,7 @@ contract PiePay is ReentrancyGuard {
     event PayrollFunded(uint256 amount);
 
     event PUnitsIssued(address indexed contributor, uint256 amount, uint256 contributionId);
-    event DistributionExecuted(uint256 indexed distributionId, uint256 pUnitsPurchased, uint256 dUnitsIssued);
+    event DistributionExecuted(uint256 pUnitsPurchased, uint256 dUnitsIssued);
     event PaymentProcessed(address indexed contributor, uint256 pUnits, uint256 dUnits, uint256 amount);
     event FundsWithdrawn(address indexed recipient, uint256 amount);
     
@@ -88,7 +84,7 @@ contract PiePay is ReentrancyGuard {
     event DUnitsPurchased(address indexed contributor, uint256 paymentAmount, uint256 dUnitsReceived, uint256 multiplier, uint256 timestamp);
     event DUnitsPaidOut(address indexed contributor, uint256 dUnitsRedeemed, uint256 tokenAmount, uint256 timestamp);
     event PUnitsConvertedToDebt(address indexed contributor, uint256 pUnitsConverted, uint256 dUnitsGranted, uint256 multiplier, uint256 timestamp);
-    event DUnitDistributionExecuted(uint256 indexed distributionId, uint256 totalDUnitsRedeemed, uint256 totalTokensDistributed, uint256 timestamp);
+    event DUnitDistributionExecuted(uint256 totalDUnitsRedeemed, uint256 totalTokensDistributed, uint256 timestamp);
 
     // Modifiers
     modifier onlyProjectLead() {
@@ -317,7 +313,7 @@ contract PiePay is ReentrancyGuard {
         // Update contract state
         _updateContractStateForDUnits(totalTokensToDistribute);
         
-        emit DUnitDistributionExecuted(distributionCounter, dUnitsToDistribute, totalTokensDistributed, block.timestamp);
+        emit DUnitDistributionExecuted(dUnitsToDistribute, totalTokensDistributed, block.timestamp);
     }
 
     function _calculateTotalActiveDUnits() private view returns (uint256 totalDUnits, uint256 activeCount) {
@@ -389,8 +385,6 @@ contract PiePay is ReentrancyGuard {
 
     function _updateContractStateForDUnits(uint256 totalTokensDistributed) private {
         payrollPool -= totalTokensDistributed;
-        distributionCounter++;
-        distributionTimestamps[distributionCounter] = block.timestamp;
     }
 
     function _logDUnitDistributionDetails(
@@ -526,7 +520,6 @@ contract PiePay is ReentrancyGuard {
     }
     
     // Replace your current functions with these:
-
     function executePUnitPayout() external onlyPayrollManager nonReentrant {
         _executePUnitPayoutInternal(type(uint256).max);
     }
@@ -571,7 +564,7 @@ contract PiePay is ReentrancyGuard {
         // Update contract state
         _updateContractState(totalTokensToDistribute);
         
-        emit DistributionExecuted(distributionCounter, pUnitsToDistribute, 0);
+        emit DistributionExecuted(pUnitsToDistribute, 0);
     }
 
     function _calculateTotalActivePUnits() private view returns (uint256 totalPUnits, uint256 activeCount) {
@@ -643,8 +636,6 @@ contract PiePay is ReentrancyGuard {
 
     function _updateContractState(uint256 totalTokensDistributed) private {
         payrollPool -= totalTokensDistributed;
-        distributionCounter++;
-        distributionTimestamps[distributionCounter] = block.timestamp;
     }
 
     function _logDistributionDetails(
@@ -671,7 +662,7 @@ contract PiePay is ReentrancyGuard {
     mapping(uint256 => address) public distributionSplits;
 
     // Add this event
-    event SplitCreated(uint256 indexed distributionId, address indexed split, uint256 usdcAmount);
+    event SplitCreated(address indexed split, uint256 usdcAmount);
     
     // Administrative Functions
     function withdrawFunds(address _recipient, uint256 _amount) external onlyPayrollManager {
@@ -707,8 +698,7 @@ contract PiePay is ReentrancyGuard {
     function getCurrentDistributionInfo() external view returns (
         uint256 totalPUnits,
         uint256 totalDUnits,
-        uint256 availableFunds,
-        uint256 lastDistributionTime
+        uint256 availableFunds
     ) {
         // Calculate total P-Units across all contributors
         for (uint i = 0; i < contributorList.length; i++) {
@@ -720,8 +710,7 @@ contract PiePay is ReentrancyGuard {
         return (
             totalPUnits,
             totalDUnits,
-            payrollPool,
-            distributionCounter > 0 ? distributionTimestamps[distributionCounter] : 0
+            payrollPool
         );
     }
     

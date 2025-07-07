@@ -381,7 +381,7 @@ abstract contract PiePayTest is Test {
         vm.prank(payrollManager);
         piePay.fundPayroll(fundAmount); // Fund with $1000
         
-        (, , uint256 availableFunds, ) = piePay.getCurrentDistributionInfo();
+        (, , uint256 availableFunds ) = piePay.getCurrentDistributionInfo();
         assertEq(availableFunds, getCoinAmount(1000)); // 1000 USDC in payroll pool
     }
   
@@ -624,8 +624,6 @@ abstract contract PiePayTest is Test {
         assertEq(piePay.payrollPool(), 0, "Payroll pool should be 0 after full payout");
         assertEq(coin.balanceOf(contributor1), getCoinAmount(50), "Contributor1 should receive 50 USDC");
         assertEq(piePay.pUnits(contributor1), 50e18, "Contributor1 should still have 50 PUnits");
-        // Check distribution counter incremented
-        assertEq(piePay.distributionCounter(), 1, "Distribution counter should be 1");
     }
 
     function testExecutePUnitPayoutOnlyPayrollManager() public {
@@ -673,9 +671,6 @@ abstract contract PiePayTest is Test {
         
         // Check payroll pool is reduced
         assertEq(piePay.payrollPool(), 0, "Payroll pool should be 0 after full payout");
-        
-        // Check distribution counter incremented
-        assertEq(piePay.distributionCounter(), 1, "Distribution counter should be 1");
     }
 
     function testExecutePUnitPayoutMultipleDistributions() public {
@@ -714,7 +709,6 @@ abstract contract PiePayTest is Test {
         assertEq(coin.balanceOf(contributor1), getCoinAmount(50) + getCoinAmount(40), "Contributor1 receives 40 USDC from second distribution");
         assertEq(coin.balanceOf(contributor2), getCoinAmount(160), "Contributor2 gets 160 USDC");
         assertEq(coin.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
-        assertEq(piePay.distributionCounter(), 2, "Should have 2 distributions");
     }
 
     // ============ D UNIT TESTS ============
@@ -729,7 +723,7 @@ abstract contract PiePayTest is Test {
         assertEq(dUnits, 500e18, "Contributor1 should have 500 D units");
         
         // Check total D units across all contributors
-        (,uint256 totalDUnits,,) = piePay.getCurrentDistributionInfo();
+        (,uint256 totalDUnits,) = piePay.getCurrentDistributionInfo();
         assertEq(totalDUnits, 500e18, "Total D units should be 500");
     }
 
