@@ -278,6 +278,8 @@ abstract contract PiePayTest is Test {
         vm.expectRevert("Not the payroll manager");
         piePay.fundPayroll(fundAmount);
     }
+
+
     
     function testFundPayrollZeroAmount() public {
         vm.prank(payrollManager);
@@ -711,7 +713,132 @@ abstract contract PiePayTest is Test {
         assertEq(coin.balanceOf(address(piePay)), 0, "PiePay should have 0 USDC after payout");
     }
 
+
+    function testRemovedContributorWithPUnitsStillReceivesPayment() public {
+        // Similar test for P-Units (this might also have the same issue)
+        // Setup: Give both contributors P-Units
+        vm.prank(contributor1);
+        piePay.submitContribution(600e18, "Work 1");
+        vm.prank(contributor2);
+        piePay.submitContribution(400e18, "Work 2");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        // Remove contributor1 from whitelist
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        // Fund the contract
+        uint256 fundAmount = getCoinAmount(500); // $500 for $1000 worth of P-Units
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Execute P-Unit payout
+        vm.prank(payrollManager);
+        piePay.executePUnitPayout();
+        
+        uint256 balance1 = coin.balanceOf(contributor1);
+        uint256 balance2 = coin.balanceOf(contributor2);
+        
+        // These assertions should pass with the fix
+        assertEq(balance1, getCoinAmount(300), "Removed contributor should still receive proportional P-Unit payout");
+        assertEq(balance2, getCoinAmount(200), "Remaining contributor should receive proportional P-Unit payout");
+    }
+
     // ============ D UNIT TESTS ============
+
+    function testRemovedContributorWithDUnitsStillReceivesPayment() public {
+        // This test should FAIL with current implementation
+        // Setup: Give both contributors D-Units
+        vm.prank(payrollManager);
+        piePay.grantDUnits(contributor1, 600e18, "Past work");
+        vm.prank(payrollManager);
+        piePay.grantDUnits(contributor2, 400e18, "Past work");
+        
+        // Verify both are in contributor list initially
+        assertEq(piePay.getContributorCount(), 2, "Should have 2 contributors initially");
+        assertTrue(piePay.whitelistedContributors(contributor1), "Contributor1 should be whitelisted");
+        assertTrue(piePay.whitelistedContributors(contributor2), "Contributor2 should be whitelisted");
+        
+        // Remove contributor1 from whitelist (simulating someone leaving the team)
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        // Verify removal
+        assertEq(piePay.getContributorCount(), 1, "Should have 1 contributor after removal");
+        assertFalse(piePay.whitelistedContributors(contributor1), "Contributor1 should no longer be whitelisted");
+        
+        // But contributor1 should still have their D-Units
+        (,uint256 dUnits1,) = piePay.getContributorUnits(contributor1);
+        (,uint256 dUnits2,) = piePay.getContributorUnits(contributor2);
+        assertEq(dUnits1, 600e18, "Contributor1 should still have D-Units after removal");
+        assertEq(dUnits2, 400e18, "Contributor2 should have D-Units");
+        
+        // Fund the contract
+        uint256 fundAmount = getCoinAmount(500); // $500 for $1000 worth of D-Units
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        // Execute D-Unit payout
+        vm.prank(payrollManager);
+        piePay.executeDUnitPayout();
+        
+        // BUG: With current implementation, contributor1 gets nothing because they're not in contributorList
+        // EXPECTED: contributor1 should get 300 tokens (600/1000 * 500)
+        // ACTUAL: contributor1 gets 0 tokens, contributor2 gets all 500 tokens
+        
+        uint256 balance1 = coin.balanceOf(contributor1);
+        uint256 balance2 = coin.balanceOf(contributor2);
+        
+        // These assertions should pass with the fix, but will FAIL with current implementation
+        assertEq(balance1, getCoinAmount(300), "Removed contributor should still receive proportional D-Unit payout");
+        assertEq(balance2, getCoinAmount(200), "Remaining contributor should receive proportional D-Unit payout");
+        
+        // Check D-Units are properly reduced
+        (,uint256 finalDUnits1,) = piePay.getContributorUnits(contributor1);
+        (,uint256 finalDUnits2,) = piePay.getContributorUnits(contributor2);
+        assertEq(finalDUnits1, 300e18, "Contributor1 D-Units should be reduced proportionally");
+        assertEq(finalDUnits2, 200e18, "Contributor2 D-Units should be reduced proportionally");
+    }
+
+    
+
+    function testCannotGrantDUnitsToRemovedContributor() public {
+        // Remove contributor1
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        // Try to grant D-Units to removed contributor - should fail
+        vm.prank(payrollManager);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.grantDUnits(contributor1, 100e18, "Should fail");
+    }
+
+    function testCannotPurchaseDUnitsAfterRemoval() public {
+        // Give contributor1 some tokens first
+        uint256 paymentAmount = getCoinAmount(100);
+        coin.mint(contributor1, paymentAmount);
+        
+        // Remove contributor1
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        // Try to purchase D-Units after removal - should fail
+        vm.prank(contributor1);
+        coin.approve(address(piePay), paymentAmount);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.purchaseDUnits(paymentAmount, 1);
+    }
+
 
     function testGrantDUnits() public {
         // Project lead grants D units for unpaid work
@@ -1178,6 +1305,215 @@ abstract contract PiePayTest is Test {
         assertEq(contributor, expectedContributor);
         assertEq(pUnitsClaimed, expectedPUnits);
     }
+
+    function testAllDUnitHoldersRemovedFromContributorList() public {
+    // Grant D-Units to both contributors
+    vm.prank(payrollManager);
+    piePay.grantDUnits(contributor1, 500e18, "Work");
+    vm.prank(payrollManager);
+    piePay.grantDUnits(contributor2, 300e18, "Work");
+    
+    // Remove both contributors
+    vm.prank(projectLead);
+    piePay.removeContributor(contributor1);
+    vm.prank(projectLead);
+    piePay.removeContributor(contributor2);
+    
+    assertEq(piePay.getContributorCount(), 0, "Should have no contributors");
+    
+    // Fund the contract
+    uint256 fundAmount = getCoinAmount(400);
+    vm.prank(payrollManager);
+    coin.approve(address(piePay), fundAmount);
+    vm.prank(payrollManager);
+    piePay.fundPayroll(fundAmount);
+    
+    // With current implementation, this should fail because no contributors in list
+    // With fix, this should work because we track D-Unit holders separately
+    vm.prank(payrollManager);
+    vm.expectRevert("No active D-Unit holders"); // This might be "No contributors to distribute to" in current implementation
+    piePay.executeDUnitPayout();
+}
+
+// Additional coverage tests I noticed are missing:
+
+function testGrantDUnitsZeroAmount() public {
+    vm.prank(payrollManager);
+    vm.expectRevert("Amount must be greater than 0");
+    piePay.grantDUnits(contributor1, 0, "Zero amount test");
+}
+
+function testGrantDUnitsEmptyReason() public {
+    vm.prank(payrollManager);
+    vm.expectRevert("Reason cannot be empty");
+    piePay.grantDUnits(contributor1, 100e18, "");
+}
+
+function testPurchaseDUnitsZeroAmount() public {
+    vm.prank(contributor1);
+    vm.expectRevert("Payment amount must be greater than 0");
+    piePay.purchaseDUnits(0, 1);
+}
+
+function testPurchaseDUnitsZeroMultiplier() public {
+    uint256 paymentAmount = getCoinAmount(100);
+    coin.mint(contributor1, paymentAmount);
+    
+    vm.prank(contributor1);
+    coin.approve(address(piePay), paymentAmount);
+    
+    vm.prank(contributor1);
+    vm.expectRevert("Multiplier must be greater than 0");
+    piePay.purchaseDUnits(paymentAmount, 0);
+}
+
+function testConvertPUnitsToDebtInsufficientPUnits() public {
+    // Give contributor1 only 50 P-Units
+    vm.prank(contributor1);
+    piePay.submitContribution(50e18, "Small work");
+    vm.prank(projectLead);
+    piePay.reviewContribution(1, true);
+    
+    // Try to convert 100 P-Units (more than they have)
+    address[] memory contributors = new address[](1);
+    contributors[0] = contributor1;
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Insufficient P units");
+    piePay.convertPUnitsToDebt(contributors, 100e18, 1);
+}
+
+function testConvertPUnitsToDebtZeroAmount() public {
+    address[] memory contributors = new address[](1);
+    contributors[0] = contributor1;
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Amount must be greater than 0");
+    piePay.convertPUnitsToDebt(contributors, 0, 1);
+}
+
+function testConvertPUnitsToDebtZeroMultiplier() public {
+    vm.prank(contributor1);
+    piePay.submitContribution(100e18, "Work");
+    vm.prank(projectLead);
+    piePay.reviewContribution(1, true);
+    
+    address[] memory contributors = new address[](1);
+    contributors[0] = contributor1;
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Multiplier must be greater than 0");
+    piePay.convertPUnitsToDebt(contributors, 50e18, 0);
+}
+
+function testConvertPUnitsToDebtEmptyArray() public {
+    address[] memory contributors = new address[](0);
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("No contributors specified");
+    piePay.convertPUnitsToDebt(contributors, 100e18, 1);
+}
+
+function testConvertPUnitsToDebtInvalidAddress() public {
+    address[] memory contributors = new address[](1);
+    contributors[0] = address(0);
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Invalid contributor address");
+    piePay.convertPUnitsToDebt(contributors, 100e18, 1);
+}
+
+function testReviewInvalidContributionId() public {
+    vm.prank(projectLead);
+    vm.expectRevert("Invalid contribution ID");
+    piePay.reviewContribution(999, true); // Non-existent contribution
+    
+    vm.prank(projectLead);
+    vm.expectRevert("Invalid contribution ID");
+    piePay.reviewContribution(0, true); // Invalid ID (IDs start at 1)
+}
+
+function testWithdrawFundsBasic() public {
+    // Fund the contract
+    uint256 fundAmount = getCoinAmount(1000);
+    vm.prank(payrollManager);
+    coin.approve(address(piePay), fundAmount);
+    vm.prank(payrollManager);
+    piePay.fundPayroll(fundAmount);
+    
+    // Withdraw some funds
+    uint256 withdrawAmount = getCoinAmount(300);
+    vm.prank(payrollManager);
+    piePay.withdrawFunds(contributor1, withdrawAmount);
+    
+    // Note: Current implementation only emits event, doesn't transfer
+    // Check payroll pool is reduced
+    assertEq(piePay.payrollPool(), getCoinAmount(700), "Payroll pool should be reduced");
+}
+
+function testWithdrawFundsInsufficientBalance() public {
+    uint256 fundAmount = getCoinAmount(100);
+    vm.prank(payrollManager);
+    coin.approve(address(piePay), fundAmount);
+    vm.prank(payrollManager);
+    piePay.fundPayroll(fundAmount);
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Insufficient funds");
+    piePay.withdrawFunds(contributor1, getCoinAmount(200));
+}
+
+function testWithdrawFundsZeroAmount() public {
+    vm.prank(payrollManager);
+    vm.expectRevert("Amount must be greater than 0");
+    piePay.withdrawFunds(contributor1, 0);
+}
+
+function testWithdrawFundsInvalidRecipient() public {
+    uint256 fundAmount = getCoinAmount(100);
+    vm.prank(payrollManager);
+    coin.approve(address(piePay), fundAmount);
+    vm.prank(payrollManager);
+    piePay.fundPayroll(fundAmount);
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Invalid recipient");
+    piePay.withdrawFunds(address(0), getCoinAmount(50));
+}
+
+function testSetProjectLeadOnlyCurrentLead() public {
+    address newLead = makeAddr("newLead");
+    
+    vm.prank(contributor1);
+    vm.expectRevert("Not the project lead");
+    piePay.setProjectLead(newLead);
+    
+    vm.prank(projectLead);
+    piePay.setProjectLead(newLead);
+    assertEq(piePay.projectLead(), newLead, "Project lead should be updated");
+}
+
+function testSetPayrollManagerOnlyCurrentManager() public {
+    address newManager = makeAddr("newManager");
+    
+    vm.prank(contributor1);
+    vm.expectRevert("Not the payroll manager");
+    piePay.setPayrollManager(newManager);
+    
+    vm.prank(payrollManager);
+    piePay.setPayrollManager(newManager);
+    assertEq(piePay.payrollManager(), newManager, "Payroll manager should be updated");
+}
+
+function testSetInvalidAddresses() public {
+    vm.prank(projectLead);
+    vm.expectRevert("Invalid address");
+    piePay.setProjectLead(address(0));
+    
+    vm.prank(payrollManager);
+    vm.expectRevert("Invalid address");
+    piePay.setPayrollManager(address(0));
+}
 
 
 
