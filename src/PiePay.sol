@@ -6,13 +6,30 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import "forge-std/console.sol";
+import "lib/forge-std/src/console.sol";
 
 /**
  * @title PiePay
  * @dev Manages team contributions with internal unit-based compensation
  * Uses internal integer accounting instead of transferable tokens
  */
+
+
+enum UnitType {
+    Profit,   // P-Units
+    Debt,     // D-Units
+    Capital   // C-Units 
+}
+
+// enum Latch {
+//     None, 
+//     Contributor, 
+//     PayrollManager,
+//     TeamLead,
+//     Governance
+// }
+
+
 contract PiePay is ReentrancyGuard {
     using SafeERC20 for IERC20;
     IERC20 public immutable paymentUnit; // e.g. USDC contract
@@ -29,6 +46,8 @@ contract PiePay is ReentrancyGuard {
     // Structs
     struct ContributionReport {
         address contributor;
+        // call units claimed
+        // UnitType unitType; // Type of unit claimed (P, D, C)
         uint256 pUnitsClaimed; // P-Units claimed by contributor
         ContributionStatus status;
         string description;
@@ -41,12 +60,22 @@ contract PiePay is ReentrancyGuard {
     // Role addresses
     address public projectLead;
     address public payrollManager;
+    // address public governance;
     
     // Contributor whitelist
     mapping(address => bool) public whitelistedContributors;
     address[] public contributorList;
+
+    
     
     // Internal unit balances (stored as integers, not transferable)
+
+
+    // Is a condensed version of this worth it? 
+    // Will this actually work? 
+    // Is it worth it? 
+    mapping(address => mapping(uint8 => uint256)) units;
+
     mapping(address => uint256) public pUnits; // Profit Units
     mapping(address => uint256) public dUnits; // Debt Units
     mapping(address => uint256) public cUnits; // Capital Units (future feature)
@@ -54,14 +83,25 @@ contract PiePay is ReentrancyGuard {
     // Contribution tracking
     mapping(uint256 => ContributionReport) public contributions;
     uint256 public contributionCounter;
+
+    // latches 
+    // 0
+    // probably a V2 feature
+    // Latch public approveLatch;
+
+    // exchange rates in basis points (1% = 100 basis points)
+    // uint256 public pUnitToDUnitRate; // Conversion rate from P-Units to D-Units
+    // uint256 public pUnitToCUnitRate; // Conversion rate from P-Units to C-Units (future feature)
+    // uint256 public dUnitToCUnitRate; // Conversion rate from D-Units to C-Units (future feature)
+
+    // or 
+
+    // uint256[3] public unitConversionRates; // [P to D, P to C, D to C] in basis points (1% = 100 basis points)
+
     
     // Project configuration
     uint256 public payrollPool; // Internal accounting for available funds
     
-    // Constants (simple dollar values)
-    uint256 public constant P_TOKEN_VALUE = 1; // $1 per P-Unit
-    uint256 public constant D_TOKEN_VALUE = 1; // $1 per D-Unit
-    uint256 public constant C_TOKEN_VALUE = 5; // $5 per C-Unit
     
     // Whitelisting
     event ProjectInitialized(string name, string description);
@@ -101,6 +141,10 @@ contract PiePay is ReentrancyGuard {
         require(whitelistedContributors[msg.sender], "Not a whitelisted contributor");
         _;
     }
+
+    // modifier onlyLatchPass( Latch _latchState) {
+    //     require()
+    // }
     
     constructor(
         string memory _projectName,
@@ -144,28 +188,38 @@ contract PiePay is ReentrancyGuard {
         require(whitelistedContributors[_contributor], "Not whitelisted");
         whitelistedContributors[_contributor] = false;
         
-        // Remove from contributor list
-        for (uint i = 0; i < contributorList.length; i++) {
-            if (contributorList[i] == _contributor) {
-                contributorList[i] = contributorList[contributorList.length - 1];
-                contributorList.pop();
-                break;
-            }
-        }
+        // // Remove from contributor list
+        // for (uint i = 0; i < contributorList.length; i++) {
+        //     if (contributorList[i] == _contributor) {
+        //         contributorList[i] = contributorList[contributorList.length - 1];
+        //         contributorList.pop();
+        //         break;
+        //     }
+        // }
         
         emit ContributorRemoved(_contributor);
     }
     
     // Contribution Reporting
     function submitContribution(
+        // change __punitsClaimed to _unitClaimed
         uint256 _pUnitsClaimed,
         string calldata _description
+        // UnitType _unitType
+        // Todo: V2 Add the ability to transfer tokens conditionally 
+        // IF param _balanceTransfer is > 0, 
+        // then transfer that amount from msg.sender to the contract
+        // then need to return the funds if contribution is not approved
+        // ...scope
     ) external onlyWhitelistedContributor {
         contributionCounter++;
+
+        // require(_unitType <= UnitType.Capital, "Invalid unit type");
         
         contributions[contributionCounter] = ContributionReport({
             contributor: msg.sender,
             pUnitsClaimed: _pUnitsClaimed,
+            // unitType: _unitType,
             status: ContributionStatus.Pending,
             description: _description
         });
@@ -176,15 +230,20 @@ contract PiePay is ReentrancyGuard {
     function reviewContribution(
         uint256 _contributionId,
         bool _approved
-    ) external onlyProjectLead {
+    ) external onlyProjectLead{
         require(_contributionId > 0 && _contributionId <= contributionCounter, "Invalid contribution ID");
         
         ContributionReport storage contribution = contributions[_contributionId];
         require(!(contribution.status == ContributionStatus.Approved), "Contribution already approved");
+
+
         
         if (_approved) {
             contribution.status = ContributionStatus.Approved;
             pUnits[contribution.contributor] += contribution.pUnitsClaimed;
+
+            // units[contribution.contributor][uint8(contribution.unitType)] += contribution.pUnitsClaimed;
+
             
             emit PUnitsIssued(contribution.contributor, contribution.pUnitsClaimed, _contributionId);
         } else {
@@ -200,6 +259,8 @@ contract PiePay is ReentrancyGuard {
     * @param amount Amount of D units to grant (in 18 decimals)
     * @param reason Description of why D units are being granted
     */
+
+   // Note: We probably don't need this anymore
     function grantDUnits(
         address contributor, 
         uint256 amount, 
@@ -221,11 +282,14 @@ contract PiePay is ReentrancyGuard {
         );
     }
 
+
+
     /**
      * @dev Purchase D units by paying into the contract
      * @param paymentAmount Amount of tokens to pay (in token decimals)
      * @param multiplier Bonus multiplier for D units received (scaled by 1000, e.g., 1500 = 1.5x)
      */
+   // Note: We probably don't need this anymore
     function purchaseDUnits(
         uint256 paymentAmount, 
         uint256 multiplier
@@ -407,6 +471,8 @@ contract PiePay is ReentrancyGuard {
         console.log("Payroll Pool:", payrollPool);
         console.log("Token Decimals:", tokenDecimals);
     }
+
+    
 
     /**
     * @dev Convert specific amounts of P units to D units for contributors
