@@ -1,0 +1,1106 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "forge-std/Test.sol";
+import "../src/PiePay.sol";
+import "./mocks/MockUSDC.sol";
+import "./mocks/MockDAI.sol";
+import "./mocks/IMintableToken.sol";
+
+// Import IERC20 for the MaliciousReentrant contract
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// Malicious contract for reentrancy testing
+contract MaliciousReentrant {
+    PiePay public piePay;
+    IERC20 public token;
+    bool public attackAttempted;
+    bool public attackSucceeded;
+    UnitType public attackUnitType;
+    uint256 public attackAmount;
+    
+    constructor(address _piePay, address _token) {
+        piePay = PiePay(_piePay);
+        token = IERC20(_token);
+    }
+    
+    function prepareAttack(UnitType _unitType, uint256 _amount) external {
+        attackUnitType = _unitType;
+        attackAmount = _amount;
+        attackAttempted = false;
+        attackSucceeded = false;
+    }
+    
+    // This will be called after we receive tokens, simulating a reentrancy attempt
+    function attemptReentrancy() public {
+        if (!attackAttempted) {
+            attackAttempted = true;
+            try piePay.executeUnitPayout(attackUnitType, attackAmount) {
+                attackSucceeded = true;
+            } catch {
+                attackSucceeded = false;
+            }
+        }
+    }
+    
+    // Fallback to trigger reentrancy attempt when receiving ETH (though we won't use this)
+    receive() external payable {
+        attemptReentrancy();
+    }
+}
+
+// Malicious token for testing token-specific attacks
+contract MaliciousToken is ERC20 {
+    bool public reenter;
+    address public target;
+    bytes public attackCalldata;
+
+    constructor() ERC20("MaliciousToken", "MTK") {}
+
+    function setAttack(bool _reenter, address _target, bytes calldata _calldata) external {
+        reenter = _reenter;
+        target = _target;
+        attackCalldata = _calldata;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        if (reenter) {
+            (bool success, ) = target.call(attackCalldata);
+            require(success, "Reentrancy attack failed");
+        }
+        return super.transfer(to, amount);
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        if (reenter) {
+            (bool success, ) = target.call(attackCalldata);
+            require(success, "Reentrancy attack failed");
+        }
+        return super.transferFrom(from, to, amount);
+    }
+}
+
+abstract contract PiePayTest is Test {
+    PiePay public piePay;
+    IMintableToken public coin;
+    
+    address public deployer;
+    address public projectLead;
+    address public payrollManager;
+    address public contributor1;
+    address public contributor2;
+    address public contributor3;
+    address public contributor4; // Additional for more edge cases
+    address public contributor5; // For large contributor sets
+    address public outsider;
+
+    // Events for testing
+    event ProjectInitialized(string name, string description, address indexed executor);
+    event ContributionSubmitted(address indexed executor, uint256 indexed contributionId, UnitType unitType, uint256 unitsRequested, string description);
+    event ContributionApproved(address indexed executor, uint256 indexed contributionId, address indexed contributor, UnitType unitType, uint256 unitsAwarded);
+    event ContributionRejected(address indexed executor, uint256 indexed contributionId, address indexed contributor);
+    event UnitsDistributed(address indexed executor, UnitType indexed unitType, uint256 totalDistributed, uint256 recipientCount);
+    event PayrollFunded(address indexed executor, uint256 amount);
+    event ContributorWhitelisted(address indexed executor, address indexed contributor);
+    event ContributorRemoved(address indexed executor, address indexed contributor);
+    event ProjectLeadUpdated(address indexed executor, address indexed newLead);
+    event PayrollManagerUpdated(address indexed executor, address indexed newManager);
+    event UnitsConverted(address indexed executor, UnitType indexed fromType, UnitType indexed toType, uint256 fromAmount, uint256 toAmount);
+    event ConversionMultipliersUpdated(address indexed executor, uint16 pToDMultiplier, uint16 pToCMultiplier, uint16 dToCMultiplier);
+    event UnitCapacityUpdated(address indexed executor, UnitType indexed unitType, uint256 newCapacity);
+
+    function deployCoin() internal virtual returns (IMintableToken);
+    function getCoinAmount(uint256 baseAmount) internal pure virtual returns (uint256);
+    
+    /**
+     * @notice Helper function to convert base units to 4-decimal unit format
+     * @param baseAmount Amount in base units (e.g., 100 for 100.0000 units)
+     * @return Amount in 4-decimal format (e.g., 1000000 for 100.0000)
+     */
+    function getUnitAmount(uint256 baseAmount) internal pure returns (uint256) {
+        return baseAmount * 10000; // 4 decimal places
+    }
+    
+    function setUp() public virtual {
+        deployer = address(this);
+        projectLead = makeAddr("projectLead");
+        payrollManager = makeAddr("payrollManager");
+        contributor1 = makeAddr("contributor1");
+        contributor2 = makeAddr("contributor2");
+        contributor3 = makeAddr("contributor3");
+        contributor4 = makeAddr("contributor4");
+        contributor5 = makeAddr("contributor5");
+        outsider = makeAddr("outsider");
+
+        coin = deployCoin();
+        
+        address[] memory initialContributors = new address[](3);
+        initialContributors[0] = contributor1;
+        initialContributors[1] = contributor2;
+        initialContributors[2] = contributor3;
+        
+        piePay = new PiePay(
+            "Test Project",
+            "A test project for PiePay",
+            projectLead,
+            payrollManager,
+            initialContributors,
+            address(coin)
+        );
+
+        // Fund payroll manager for tests
+        coin.mint(payrollManager, getCoinAmount(1000000)); // Increased for large amount tests
+
+        // Whitelist additional contributors
+        vm.prank(projectLead);
+        piePay.whitelistContributor(contributor4);
+        vm.prank(projectLead);
+        piePay.whitelistContributor(contributor5);
+    }
+
+    // ============ INITIALIZATION TESTS ============
+    
+    function testInitialization() public {
+        assertEq(piePay.projectLead(), projectLead);
+        assertEq(piePay.payrollManager(), payrollManager);
+        assertEq(address(piePay.paymentToken()), address(coin));
+        assertEq(piePay.pToDMultiplier(), 15000); // 1.5x default
+        assertEq(piePay.pToCMultiplier(), 3000);  // 0.3x default
+        assertEq(piePay.dToCMultiplier(), 2000);  // 0.2x default
+        assertTrue(piePay.whitelistedContributors(contributor1));
+        assertTrue(piePay.whitelistedContributors(contributor2));
+        assertTrue(piePay.whitelistedContributors(contributor3));
+        assertEq(piePay.getContributorCount(), 5); // Including additional
+    }
+
+    function testInitializationEmitsEvent() public {
+        vm.expectEmit(true, false, false, true);
+        emit ProjectInitialized("New Project", "New Description", address(this));
+        
+        address[] memory contributors = new address[](0);
+        new PiePay(
+            "New Project",
+            "New Description", 
+            projectLead,
+            payrollManager,
+            contributors,
+            address(coin)
+        );
+    }
+
+    function testInitializationWithZeroAddress() public {
+        address[] memory contributors = new address[](0);
+        
+        vm.expectRevert("Invalid project lead address");
+        new PiePay("Test", "Test", address(0), payrollManager, contributors, address(coin));
+        
+        vm.expectRevert("Invalid payroll manager address");
+        new PiePay("Test", "Test", projectLead, address(0), contributors, address(coin));
+        
+        vm.expectRevert("Invalid payment token address");
+        new PiePay("Test", "Test", projectLead, payrollManager, contributors, address(0));
+    }
+
+    function testInitializationWithLargeInitialContributors() public {
+        address[] memory largeContributors = new address[](100);
+        for (uint i = 0; i < 100; i++) {
+            largeContributors[i] = makeAddr(string(abi.encodePacked("contrib", i)));
+        }
+        
+        PiePay largePiePay = new PiePay(
+            "Large Project",
+            "Test with many contributors",
+            projectLead,
+            payrollManager,
+            largeContributors,
+            address(coin)
+        );
+        
+        assertEq(largePiePay.getContributorCount(), 100);
+        for (uint i = 0; i < 100; i++) {
+            assertTrue(largePiePay.whitelistedContributors(largeContributors[i]));
+        }
+    }
+
+    // ============ WHITELIST MANAGEMENT TESTS ============
+    
+    function testWhitelistContributor() public {
+        address newContrib = makeAddr("newContrib");
+        assertFalse(piePay.whitelistedContributors(newContrib));
+        
+        vm.expectEmit(true, true, false, true);
+        emit ContributorWhitelisted(projectLead, newContrib);
+        
+        vm.prank(projectLead);
+        piePay.whitelistContributor(newContrib);
+        
+        assertTrue(piePay.whitelistedContributors(newContrib));
+        assertEq(piePay.getContributorCount(), 6); // Increased from 5
+    }
+
+    function testWhitelistContributorAlreadyWhitelisted() public {
+        vm.prank(projectLead);
+        vm.expectRevert("Already whitelisted");
+        piePay.whitelistContributor(contributor1);
+    }
+
+    function testWhitelistContributorOnlyProjectLead() public {
+        vm.prank(payrollManager);
+        vm.expectRevert("Not the project lead");
+        piePay.whitelistContributor(makeAddr("new"));
+        
+        vm.prank(outsider);
+        vm.expectRevert("Not the project lead");
+        piePay.whitelistContributor(makeAddr("new"));
+    }
+
+    function testRemoveContributor() public {
+        assertTrue(piePay.whitelistedContributors(contributor1));
+        
+        vm.expectEmit(true, true, false, true);
+        emit ContributorRemoved(projectLead, contributor1);
+        
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        assertFalse(piePay.whitelistedContributors(contributor1));
+        assertEq(piePay.getContributorCount(), 5); // Unchanged for historical
+    }
+
+    function testRemoveContributorNotWhitelisted() public {
+        vm.prank(projectLead);
+        vm.expectRevert("Not whitelisted");
+        piePay.removeContributor(outsider);
+    }
+
+    function testRemoveContributorOnlyProjectLead() public {
+        vm.prank(payrollManager);
+        vm.expectRevert("Not the project lead");
+        piePay.removeContributor(contributor1);
+    }
+
+    function testRemoveAndReWhitelistContributor() public {
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        assertFalse(piePay.whitelistedContributors(contributor1));
+        
+        vm.prank(projectLead);
+        piePay.whitelistContributor(contributor1);
+        
+        assertTrue(piePay.whitelistedContributors(contributor1));
+    }
+
+    // ============ CONTRIBUTION WORKFLOW TESTS ============
+
+    function testSubmitContributionPUnits() public {
+        vm.expectEmit(true, true, false, true);
+        emit ContributionSubmitted(contributor1, 1, UnitType.Profit, getUnitAmount(500), "P-Unit work");
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(500), "P-Unit work");
+        
+        assertEq(piePay.contributionCounter(), 1);
+        
+        PiePay.ContributionReport memory contribution = piePay.getContributionDetails(1);
+        
+        assertEq(contribution.contributor, contributor1);
+        assertEq(uint8(contribution.unitType), uint8(UnitType.Profit));
+        assertEq(contribution.unitsRequested, getUnitAmount(500));
+        assertEq(uint8(contribution.status), uint8(ContributionStatus.Pending));
+        assertEq(contribution.description, "P-Unit work");
+    }
+
+    function testSubmitContributionDUnits() public {
+        vm.prank(contributor2);
+        piePay.submitContribution(UnitType.Debt, getUnitAmount(300), "D-Unit work");
+        
+        PiePay.ContributionReport memory contribution = piePay.getContributionDetails(1);
+        assertEq(uint8(contribution.unitType), uint8(UnitType.Debt));
+    }
+
+    function testSubmitContributionCUnits() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Capital, getUnitAmount(200), "C-Unit work");
+        
+        PiePay.ContributionReport memory contribution = piePay.getContributionDetails(1);
+        assertEq(uint8(contribution.unitType), uint8(UnitType.Capital));
+    }
+
+    function testSubmitContributionOnlyWhitelisted() public {
+        vm.prank(outsider);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Unauthorized");
+    }
+
+    function testSubmitContributionZeroUnits() public {
+        vm.prank(contributor1);
+        vm.expectRevert("Units requested must be greater than 0");
+        piePay.submitContribution(UnitType.Profit, 0, "Zero units");
+    }
+
+    function testSubmitContributionEmptyDescription() public {
+        vm.prank(contributor1);
+        vm.expectRevert("Description cannot be empty");
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "");
+    }
+
+    function testSubmitContributionInvalidUnitType() public {
+        vm.prank(contributor1);
+        vm.expectRevert("Invalid unit type");
+        // Use assembly to bypass enum
+        (bool success,) = address(piePay).call(abi.encodeWithSelector(
+            piePay.submitContribution.selector, uint8(3), getUnitAmount(100), "Invalid"
+        ));
+        assertFalse(success);
+    }
+
+    function testSubmitContributionMaxUnits() public {
+        uint256 maxUnits = type(uint256).max / 10000; // To avoid overflow in toInternalUnits
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, maxUnits, "Max units");
+        
+        PiePay.ContributionReport memory contrib = piePay.getContributionDetails(1);
+        assertEq(contrib.unitsRequested, maxUnits);
+    }
+
+    function testApproveContribution() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(500), "P-Unit work");
+        
+        (uint256 pUnits,,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, 0);
+        
+        uint256 expectedUnits = getUnitAmount(500);
+        
+        vm.expectEmit(true, true, true, true);
+        emit ContributionApproved(projectLead, 1, contributor1, UnitType.Profit, expectedUnits);
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (pUnits,,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, expectedUnits);
+        
+        PiePay.ContributionReport memory contribution = piePay.getContributionDetails(1);
+        assertEq(uint8(contribution.status), uint8(ContributionStatus.Approved));
+        
+        address[] memory pUnitHolders = piePay.getUnitHolders(UnitType.Profit);
+        assertEq(pUnitHolders.length, 1);
+        assertEq(pUnitHolders[0], contributor1);
+    }
+
+    function testApproveContributionWithMultiplier() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(15000, 3000, 2000);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Debt, getUnitAmount(1000), "D-Unit work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (,uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, getUnitAmount(1500)); // 1000 * 1.5
+    }
+
+    function testApproveContributionPUnitsNoMultiplier() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(15000, 3000, 2000);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-Unit work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (uint256 pUnits,,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, getUnitAmount(1000));
+    }
+
+    function testApproveContributionCUnitsNoMultiplier() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(15000, 3000, 2000);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Capital, getUnitAmount(1000), "C-Unit work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (,,uint256 cUnits) = piePay.getContributorUnits(contributor1);
+        assertEq(cUnits, getUnitAmount(1000));
+    }
+
+    function testRejectContribution() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(500), "Work");
+        
+        vm.expectEmit(true, true, true, false);
+        emit ContributionRejected(projectLead, 1, contributor1);
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, false);
+        
+        (uint256 pUnits,,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, 0);
+        
+        PiePay.ContributionReport memory contribution = piePay.getContributionDetails(1);
+        assertEq(uint8(contribution.status), uint8(ContributionStatus.Rejected));
+        
+        address[] memory holders = piePay.getUnitHolders(UnitType.Profit);
+        assertEq(holders.length, 0);
+    }
+
+    function testReviewContributionOnlyProjectLead() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Work");
+        
+        vm.prank(payrollManager);
+        vm.expectRevert("Not the project lead");
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(outsider);
+        vm.expectRevert("Not the project lead");
+        piePay.reviewContribution(1, false);
+    }
+
+    function testReviewInvalidContribution() public {
+        vm.prank(projectLead);
+        vm.expectRevert("Invalid contribution ID");
+        piePay.reviewContribution(0, true);
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Invalid contribution ID");
+        piePay.reviewContribution(type(uint256).max, true);
+    }
+
+    function testReviewAlreadyProcessedContribution() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Contribution already processed");
+        piePay.reviewContribution(1, false);
+    }
+
+    function testApproveContributionMaxUnits() public {
+        uint256 maxUnits = type(uint256).max / 10000;
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, maxUnits, "Max work");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (uint256 pUnits,,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, maxUnits);
+        
+        assertEq(piePay.getTotalUnitsOutstanding(UnitType.Profit), maxUnits);
+    }
+
+    function testApproveContributionOverflowTotalUnits() public {
+        // Set up near max
+        uint256 nearMax = (type(uint256).max / 10000) - 1;
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, nearMax, "Near max");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor2);
+        piePay.submitContribution(UnitType.Profit, 2, "Overflow attempt");
+        vm.prank(projectLead);
+        vm.expectRevert("Total units underflow"); // Actually would be add overflow in safe math
+        piePay.reviewContribution(2, true);
+    }
+
+    // ============ UNIT CONVERSION TESTS ============
+
+    function testConvertPUnitsToD() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        (uint256 pUnits, uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, getUnitAmount(1000));
+        assertEq(dUnits, 0);
+        
+        uint256 convertAmount = getUnitAmount(500);
+        uint256 expectedDUnits = (convertAmount * 15000) / 10000;
+        
+        vm.expectEmit(true, true, true, true);
+        emit UnitsConverted(contributor1, UnitType.Profit, UnitType.Debt, convertAmount, expectedDUnits);
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, convertAmount);
+        
+        (pUnits, dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, getUnitAmount(500));
+        assertEq(dUnits, expectedDUnits);
+        
+        address[] memory pHolders = piePay.getUnitHolders(UnitType.Profit);
+        address[] memory dHolders = piePay.getUnitHolders(UnitType.Debt);
+        assertEq(pHolders.length, 1);
+        assertEq(dHolders.length, 1);
+    }
+
+    function testConvertAllPUnitsToD() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(800), "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(800));
+        
+        (uint256 pUnits, uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(pUnits, 0);
+        assertEq(dUnits, getUnitAmount(1200)); // 800 * 1.5
+        
+        address[] memory pHolders = piePay.getUnitHolders(UnitType.Profit);
+        assertEq(pHolders.length, 0);
+    }
+
+    function testConvertPUnitsToDInsufficientBalance() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(300), "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Insufficient source units");
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(400));
+    }
+
+    function testConvertPUnitsToDZeroAmount() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(500), "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Amount must be greater than 0");
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, 0);
+    }
+
+    function testConvertPUnitsToDOnlyWhitelisted() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(500), "P-Unit work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Not a whitelisted contributor");
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(100));
+    }
+
+    function testConvertPToDWithMinMultiplier() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(1, 3000, 2000); // Min multiplier
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(1000));
+        
+        (, uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, getUnitAmount(1)); // 1000 * 0.0001x (since 1/10000)
+    }
+
+    function testConvertPToDWithMaxMultiplier() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(type(uint16).max, 3000, 2000);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1), "P-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(1));
+        
+        (, uint256 dUnits,) = piePay.getContributorUnits(contributor1);
+        assertEq(dUnits, (getUnitAmount(1) * type(uint16).max) / 10000);
+    }
+
+    function testChainConversionsPToDToC() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(15000, 3000, 2000); // 1.5x P->D, 0.3x P->C, 0.2x D->C
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        // P -> D: 500 P to 750 D
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(500));
+        
+        // D -> C: 750 D to 150 C (750 * 0.2)
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Debt, UnitType.Capital, fromInternalUnits(toInternalUnits(getUnitAmount(750))));
+        
+        (uint256 p, uint256 d, uint256 c) = piePay.getContributorUnits(contributor1);
+        assertEq(p, getUnitAmount(500));
+        assertEq(d, 0);
+        assertEq(c, getUnitAmount(150));
+    }
+
+    function testConversionOverflowToAmount() public {
+        vm.prank(payrollManager);
+        piePay.setConversionMultipliers(type(uint16).max, 3000, 2000);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        vm.expectRevert(/* arithmetic overflow */);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(1000));
+    }
+
+    // ============ PAYOUT SYSTEM TESTS ============
+
+    function testFundPayroll() public {
+        uint256 amount = getCoinAmount(5000);
+        
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), amount);
+        
+        vm.expectEmit(true, false, false, true);
+        emit PayrollFunded(payrollManager, amount);
+        
+        vm.prank(payrollManager);
+        piePay.fundPayroll(amount);
+        
+        assertEq(piePay.payrollPool(), amount);
+        assertEq(coin.balanceOf(address(piePay)), amount);
+    }
+
+    function testFundPayrollOnlyPayrollManager() public {
+        uint256 amount = getCoinAmount(1000);
+        coin.mint(projectLead, amount);
+        
+        vm.prank(projectLead);
+        coin.approve(address(piePay), amount);
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Not the payroll manager");
+        piePay.fundPayroll(amount);
+    }
+
+    function testFundPayrollMaxAmount() public {
+        uint256 maxAmount = type(uint256).max;
+        coin.mint(payrollManager, maxAmount);
+        
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), maxAmount);
+        
+        vm.prank(payrollManager);
+        piePay.fundPayroll(maxAmount);
+        
+        assertEq(piePay.payrollPool(), maxAmount);
+    }
+
+    function testFundPayrollZeroAmount() public {
+        vm.prank(payrollManager);
+        vm.expectRevert("Amount must be greater than 0");
+        piePay.fundPayroll(0);
+    }
+
+    function testPUnitPayoutDecrementsUnits() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(600), "Work 1");
+        vm.prank(contributor2);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(400), "Work 2");
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        uint256 fundAmount = getCoinAmount(500);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.expectEmit(true, false, false, true);
+        emit UnitsDistributed(payrollManager, UnitType.Profit, fundAmount, 2);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        (uint256 pUnits1,,) = piePay.getContributorUnits(contributor1);
+        (uint256 pUnits2,,) = piePay.getContributorUnits(contributor2);
+        
+        assertEq(pUnits1, getUnitAmount(300));
+        assertEq(pUnits2, getUnitAmount(200));
+        
+        assertGe(coin.balanceOf(contributor1), getCoinAmount(300));
+        assertEq(coin.balanceOf(contributor2), getCoinAmount(200));
+        
+        assertEq(piePay.getTotalUnitsOutstanding(UnitType.Profit), getUnitAmount(500));
+    }
+
+    function testPayoutWithManyHolders() public {
+        // Setup 5 contributors with P-Units
+        address[] memory contribs = new address[](5);
+        contribs[0] = contributor1;
+        contribs[1] = contributor2;
+        contribs[2] = contributor3;
+        contribs[3] = contributor4;
+        contribs[4] = contributor5;
+        
+        for (uint i = 0; i < 5; i++) {
+            vm.prank(contribs[i]);
+            piePay.submitContribution(UnitType.Profit, getUnitAmount(200), string(abi.encodePacked("Work ", i)));
+            vm.prank(projectLead);
+            piePay.reviewContribution(i + 1, true);
+        }
+        
+        uint256 fundAmount = getCoinAmount(1000);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        for (uint i = 0; i < 5; i++) {
+            (uint256 pUnits,,) = piePay.getContributorUnits(contribs[i]);
+            assertEq(pUnits, 0);
+            assertGe(coin.balanceOf(contribs[i]), getCoinAmount(200));
+        }
+    }
+
+    function testPayoutRoundingExtreme() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, 1, "Minimal work"); // 0.0001 units
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = 1; // Minimal token amount
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        assertEq(coin.balanceOf(contributor1), fundAmount); // All to first (only) holder
+    }
+
+    function testPayoutOverPoolUsesPool() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(50);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, getCoinAmount(100)); // Requests more, uses 50
+        
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(50));
+        assertEq(piePay.payrollPool(), 0);
+    }
+
+    function testPayoutAfterRoleChange() public {
+        address newManager = makeAddr("newManager");
+        vm.prank(payrollManager);
+        piePay.setPayrollManager(newManager);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(100);
+        coin.mint(newManager, fundAmount);
+        vm.prank(newManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(newManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(newManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        assertEq(coin.balanceOf(contributor1), getCoinAmount(100));
+    }
+
+    // ============ CAPACITY CONSTRAINT TESTS ============
+
+    function testSetUnitCapacity() public {
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Debt, getUnitAmount(1000));
+        
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Capital, getUnitAmount(500));
+    }
+
+    function testSetUnitCapacityPUnitsRevert() public {
+        vm.prank(payrollManager);
+        vm.expectRevert("Cannot set capacity for P-Units");
+        piePay.setUnitCapacity(UnitType.Profit, getUnitAmount(1000));
+    }
+
+    function testContributionExceedsCapacity() public {
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Debt, getUnitAmount(500));
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Debt, getUnitAmount(1000), "D-work");
+        
+        vm.prank(projectLead);
+        vm.expectRevert("Exceeds unit capacity");
+        piePay.reviewContribution(1, true);
+    }
+
+    function testConversionExceedsCapacity() public {
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Debt, getUnitAmount(500));
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        vm.expectRevert("Exceeds conversion capacity");
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(1000));
+    }
+
+    function testCapacityFreedOnPayout() public {
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Debt, getUnitAmount(1000));
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Debt, getUnitAmount(500), "D-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(750);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Debt, fundAmount);
+        
+        // Capacity should be freed
+        vm.prank(contributor2);
+        piePay.submitContribution(UnitType.Debt, getUnitAmount(500), "D-work2");
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        
+        (,uint256 d2,) = piePay.getContributorUnits(contributor2);
+        assertEq(d2, getUnitAmount(750));
+    }
+
+    function testUnlimitedCapacityZero() public {
+        vm.prank(payrollManager);
+        piePay.setUnitCapacity(UnitType.Debt, 0);
+        
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Debt, type(uint256).max / 15000, "Large D");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+    }
+
+    // ============ SECURITY TESTS ============
+
+    function testReentrancyProtection() public {
+        MaliciousReentrant malicious = new MaliciousReentrant(address(piePay), address(coin));
+        
+        vm.prank(projectLead);
+        piePay.whitelistContributor(address(malicious));
+        
+        vm.prank(address(malicious));
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Malicious work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(100);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        malicious.prepareAttack(UnitType.Profit, getCoinAmount(50));
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, getCoinAmount(100));
+        
+        malicious.attemptReentrancy();
+        
+        assertTrue(malicious.attackAttempted());
+        assertFalse(malicious.attackSucceeded());
+        
+        assertEq(coin.balanceOf(address(malicious)), getCoinAmount(100));
+    }
+
+    function testMaliciousTokenTransfer() public {
+        // Deploy malicious token
+        MaliciousToken maliciousToken = new MaliciousToken();
+        maliciousToken.mint(payrollManager, getCoinAmount(1000));
+        
+        // New PiePay with malicious token
+        address[] memory contribs = new address[](1);
+        contribs[0] = contributor1;
+        PiePay maliciousPiePay = new PiePay(
+            "Malicious Test",
+            "Test with bad token",
+            projectLead,
+            payrollManager,
+            contribs,
+            address(maliciousToken)
+        );
+        
+        // Set attack to reenter fundPayroll
+        bytes memory attackData = abi.encodeWithSelector(maliciousPiePay.fundPayroll.selector, 1);
+        maliciousToken.setAttack(true, address(maliciousPiePay), attackData);
+        
+        vm.prank(payrollManager);
+        maliciousToken.approve(address(maliciousPiePay), getCoinAmount(100));
+        
+        vm.prank(payrollManager);
+        vm.expectRevert(/* reentrancy or attack fail */);
+        maliciousPiePay.fundPayroll(getCoinAmount(100));
+    }
+
+    // ============ FINANCIAL INTEGRITY TESTS ============
+
+    function testNoFundLossInRounding() public {
+        // Setup 3 contributors with odd units
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, 3333, "Work1"); // 0.3333 units
+        vm.prank(contributor2);
+        piePay.submitContribution(UnitType.Profit, 3333, "Work2");
+        vm.prank(contributor3);
+        piePay.submitContribution(UnitType.Profit, 3334, "Work3"); // Total 1 unit
+        
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(2, true);
+        vm.prank(projectLead);
+        piePay.reviewContribution(3, true);
+        
+        uint256 fundAmount = getCoinAmount(1); // 1 token to distribute
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        uint256 totalReceived = coin.balanceOf(contributor1) + coin.balanceOf(contributor2) + coin.balanceOf(contributor3);
+        assertEq(totalReceived, fundAmount, "No loss in rounding");
+    }
+
+    function testTotalUnitsConsistency() public {
+        // Complex operations
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(1000), "P1");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Profit, UnitType.Debt, getUnitAmount(500));
+        
+        vm.prank(contributor1);
+        piePay.convertUnits(UnitType.Debt, UnitType.Capital, getUnitAmount(750));
+        
+        uint256 totalP = piePay.getTotalUnitsOutstanding(UnitType.Profit);
+        uint256 totalD = piePay.getTotalUnitsOutstanding(UnitType.Debt);
+        uint256 totalC = piePay.getTotalUnitsOutstanding(UnitType.Capital);
+        
+        assertEq(totalP, getUnitAmount(500));
+        assertEq(totalD, 0);
+        assertEq(totalC, getUnitAmount(150)); // 750 * 0.2
+    }
+
+    function testHistoricalPayoutAfterRemoval() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Capital, getUnitAmount(100), "C-work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        vm.prank(projectLead);
+        piePay.removeContributor(contributor1);
+        
+        uint256 fundAmount = getCoinAmount(100);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Capital, fundAmount);
+        
+        assertEq(coin.balanceOf(contributor1), fundAmount);
+    }
+
+    function testNoDoublePayout() public {
+        vm.prank(contributor1);
+        piePay.submitContribution(UnitType.Profit, getUnitAmount(100), "Work");
+        vm.prank(projectLead);
+        piePay.reviewContribution(1, true);
+        
+        uint256 fundAmount = getCoinAmount(100);
+        vm.prank(payrollManager);
+        coin.approve(address(piePay), fundAmount);
+        vm.prank(payrollManager);
+        piePay.fundPayroll(fundAmount);
+        
+        vm.prank(payrollManager);
+        piePay.executeUnitPayout(UnitType.Profit, fundAmount);
+        
+        // Second payout should fail as no units
+        vm.prank(payrollManager);
+        vm.expectRevert("No unit holders for this type");
+        piePay.executeUnitPayout(UnitType.Profit, 1);
+    }
+
+    // Additional financial edge cases: max totals, precision with different decimals already covered by USDC/DAI
+}
+
+// Concrete implementations
+contract PiePayUSDCTest is PiePayTest {
+    function deployCoin() internal override returns (IMintableToken) {
+        return IMintableToken(address(new MockUSDC()));
+    }
+    
+    function getCoinAmount(uint256 baseAmount) internal pure override returns (uint256) {
+        return baseAmount * 10**6;
+    }
+}
+
+contract PiePayDAITest is PiePayTest {
+    function deployCoin() internal override returns (IMintableToken) {
+        return IMintableToken(address(new MockDAI()));
+    }
+    
+    function getCoinAmount(uint256 baseAmount) internal pure override returns (uint256) {
+        return baseAmount * 10**18;
+    }
+}
