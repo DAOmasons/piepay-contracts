@@ -124,7 +124,7 @@ contract PiePay is ReentrancyGuard {
      * @param _amount Amount in human-readable units (e.g., 100 for 100 tokens)
      * @return Amount in token precision (e.g., 100000000 for 100 USDC)
      */
-    function toTokenPrecision(uint256 _amount) public view returns (uint256) {
+    function toTokenPrecision(uint256 _amount) internal view returns (uint256) {
         require(_amount <= type(uint256).max / (10 ** paymentTokenDecimals), "toTokenPrecision: overflow");
         return _amount * (10 ** paymentTokenDecimals);
     }
@@ -134,7 +134,7 @@ contract PiePay is ReentrancyGuard {
      * @param _amount Amount in token precision
      * @return Amount in human-readable units
      */
-    function fromTokenPrecision(uint256 _amount) public view returns (uint256) {
+    function fromTokenPrecision(uint256 _amount) internal view returns (uint256) {
         return _amount / (10 ** paymentTokenDecimals);
     }
 
@@ -143,7 +143,7 @@ contract PiePay is ReentrancyGuard {
      * @param _userUnits Amount in 4-decimal format (e.g., 10000 for 1.0000 units)
      * @return Amount in internal token precision
      */
-    function toInternalUnits(uint256 _userUnits) public view returns (uint256) {
+    function toInternalUnits(uint256 _userUnits) internal view returns (uint256) {
         require(_userUnits <= type(uint256).max / (10 ** paymentTokenDecimals), "toInternalUnits: overflow");
         return _userUnits * (10 ** paymentTokenDecimals) / 10000;
     }
@@ -153,7 +153,7 @@ contract PiePay is ReentrancyGuard {
      * @param _internalUnits Amount in internal token precision
      * @return Amount in 4-decimal format
      */
-    function fromInternalUnits(uint256 _internalUnits) public view returns (uint256) {
+    function fromInternalUnits(uint256 _internalUnits) internal view returns (uint256) {
         require(_internalUnits <= type(uint256).max / 10000, "fromInternalUnits: overflow");
         // Use higher precision arithmetic to minimize rounding loss
         uint256 result = (_internalUnits * 10000 + (10 ** paymentTokenDecimals) / 2) / (10 ** paymentTokenDecimals);

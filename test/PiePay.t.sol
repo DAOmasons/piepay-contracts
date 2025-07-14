@@ -2130,51 +2130,6 @@ abstract contract PiePayTest is Test {
 
     // ============ OVERFLOW PROTECTION TESTS ============
 
-    function testToInternalUnitsOverflowProtection() public {
-        // Test maximum safe value calculation matches contract logic
-        uint256 maxSafe = type(uint256).max / (10 ** piePay.paymentTokenDecimals()) / 10000;
-        
-        // Test boundary: one less than max should work
-        if (maxSafe > 0) {
-            uint256 result = piePay.toInternalUnits(maxSafe);
-            assertGt(result, 0); // Should succeed
-        }
-        
-        // Test overflow case - should revert with any very large value
-        vm.expectRevert("toInternalUnits: overflow");
-        piePay.toInternalUnits(type(uint256).max / 1000); // Still way too large
-    }
-
-    function testToInternalUnitsExtremeOverflowExploit() public {
-        // Test with type(uint256).max - should revert
-        vm.expectRevert("toInternalUnits: overflow");
-        piePay.toInternalUnits(type(uint256).max);
-        
-        // Test with near-max value that would overflow in multiplication
-        uint256 nearMax = type(uint256).max / 2;
-        vm.expectRevert("toInternalUnits: overflow");
-        piePay.toInternalUnits(nearMax);
-    }
-
-    function testFromInternalUnitsOverflowProtection() public {
-        // Test maximum safe value calculation matches contract logic
-        uint256 maxSafe = type(uint256).max / 10000;
-        
-        // Test a safe value well below the limit
-        uint256 safeValue = maxSafe / 2;
-        uint256 result = piePay.fromInternalUnits(safeValue);
-        assertGt(result, 0); // Should succeed
-        
-        // Test overflow case - should revert with value that would overflow
-        vm.expectRevert("fromInternalUnits: overflow");
-        piePay.fromInternalUnits(type(uint256).max / 100); // Still causes overflow in multiplication
-    }
-
-    function testFromInternalUnitsExtremeOverflowExploit() public {
-        // Test with type(uint256).max
-        vm.expectRevert("fromInternalUnits: overflow");
-        piePay.fromInternalUnits(type(uint256).max);
-    }
 
     function testSubmitContributionOverflowExploit() public {
         // Try to submit contribution with maximum value to cause overflow
@@ -2318,43 +2273,6 @@ abstract contract PiePayTest is Test {
         assertEq(pUnits, maxSafeUnits);
     }
 
-    function testToTokenPrecisionOverflowProtection() public {
-        // Test maximum safe value - should work
-        uint256 maxSafe = type(uint256).max / (10 ** piePay.paymentTokenDecimals());
-        uint256 result = piePay.toTokenPrecision(maxSafe);
-        assertGt(result, 0); // Should succeed
-        
-        // Test overflow case - should revert
-        uint256 overflowValue = maxSafe + 1;
-        vm.expectRevert("toTokenPrecision: overflow");
-        piePay.toTokenPrecision(overflowValue);
-    }
-
-    function testToTokenPrecisionExtremeOverflowExploit() public {
-        // Test with type(uint256).max - should revert
-        vm.expectRevert("toTokenPrecision: overflow");
-        piePay.toTokenPrecision(type(uint256).max);
-        
-        // Test with near-max value that would overflow in multiplication
-        uint256 nearMax = type(uint256).max / 2;
-        vm.expectRevert("toTokenPrecision: overflow");
-        piePay.toTokenPrecision(nearMax);
-    }
-
-    // Test that precision fixes don't introduce new overflows
-    function testPrecisionFixesNoNewOverflows() public {
-        // Test that our precision improvements don't cause overflows
-        uint256 largeAmount = type(uint64).max; // Use smaller safe value
-        
-        // This should work with our improved precision arithmetic
-        uint256 result = piePay.fromInternalUnits(largeAmount);
-        assertGt(result, 0);
-        
-        // Test edge case of precision calculation with safe value
-        uint256 precisionTestValue = type(uint256).max / 10000 / 1000; // Much smaller to be safe
-        uint256 precisionResult = piePay.fromInternalUnits(precisionTestValue);
-        assertGt(precisionResult, 0);
-    }
 }
 
 // Concrete implementations for different token decimals
