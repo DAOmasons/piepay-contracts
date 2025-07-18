@@ -427,7 +427,6 @@ contract PiePay is ReentrancyGuard {
         uint256 previousToBalance
     ) private {
         uint8 fromIndex = uint8(fromType);
-        uint8 toIndex = uint8(toType);
         
         // Remove from source type holders if balance becomes zero
         if (unitBalances[user][fromIndex] == 0) {
