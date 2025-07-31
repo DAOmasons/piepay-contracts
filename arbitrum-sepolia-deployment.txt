@@ -1,0 +1,6 @@
+# Arbitrum Sepolia Deployment Info - SUCCESSFUL
+Network: Arbitrum Sepolia (Chain ID: 421614)
+MockUSDC: 0x392c615E9f0673E1c8E9a6CbF38140D7AD3C16b1
+PiePay: 0xCfa3fAF4cd8Bfc8ba93f87c30C46dAE62B578a2b
+Deployer: 0x61224274C0b009a81B49ae29c0446A8AeDb65EB7
+Block Explorer: https://sepolia.arbiscan.io/

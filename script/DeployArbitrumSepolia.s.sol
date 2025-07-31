@@ -5,13 +5,14 @@ import "forge-std/Script.sol";
 import "../src/PiePay.sol";
 import "../test/mocks/MockUSDC.sol";
 
-contract DeployTestnet is Script {
+contract DeployArbitrumSepolia is Script {
     function run() public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
         
         console.log("Deploying contracts with account:", deployer);
         console.log("Account balance:", deployer.balance);
+        console.log("Network: Arbitrum Sepolia");
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -26,8 +27,8 @@ contract DeployTestnet is Script {
 
         // Deploy PiePay contract
         PiePay piePay = new PiePay(
-            "Test PiePay Project",
-            "A test project for PiePay profit sharing system",
+            "PiePay Project - Arbitrum Sepolia",
+            "A PiePay profit sharing system deployed on Arbitrum Sepolia",
             deployer,           // projectLead
             deployer,           // payrollManager  
             initialContributors,
@@ -52,13 +53,15 @@ contract DeployTestnet is Script {
 
         // Save deployment info to file
         string memory deploymentInfo = string(abi.encodePacked(
-            "# Testnet Deployment Info\n",
+            "# Arbitrum Sepolia Deployment Info - SUCCESSFUL\n",
+            "Network: Arbitrum Sepolia (Chain ID: 421614)\n",
             "MockUSDC: ", vm.toString(address(mockUSDC)), "\n",
             "PiePay: ", vm.toString(address(piePay)), "\n",
-            "Deployer: ", vm.toString(deployer), "\n"
+            "Deployer: ", vm.toString(deployer), "\n",
+            "Block Explorer: https://sepolia.arbiscan.io/\n"
         ));
         
-        vm.writeFile("./deployment.txt", deploymentInfo);
-        console.log("Deployment info saved to deployment.txt");
+        vm.writeFile("./arbitrum-sepolia-deployment.txt", deploymentInfo);
+        console.log("Deployment info saved to arbitrum-sepolia-deployment.txt");
     }
 }
