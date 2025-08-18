@@ -26,6 +26,7 @@ contract PiePay is ReentrancyGuard {
     
     IERC20 public immutable paymentToken;
     uint8 public immutable paymentTokenDecimals; //Use payment token decimals for unit precision as well
+    address public immutable factory; // The factory contract that deployed this instance
     
     address public projectLead; // Consider this could be an external contract
     address public payrollManager; // This too
@@ -177,6 +178,14 @@ contract PiePay is ReentrancyGuard {
         _;
     }
 
+    /**
+     * @notice Modifier to ensure only authorized factory can create PiePay instances
+     */
+    modifier onlyAuthorizedFactory() {
+        require(msg.sender == factory, "Only authorized factory can call this function");
+        _;
+    }
+
     // ============ CONSTRUCTOR ============
     
     constructor(
@@ -191,6 +200,18 @@ contract PiePay is ReentrancyGuard {
         require(_payrollManager != address(0), "Invalid payroll manager address");
         require(_paymentToken != address(0), "Invalid payment token address");
         
+        // Store the factory address that deployed this contract
+        // msg.sender here is the factory contract since it called `new PiePay(...)`
+        factory = msg.sender;
+        
+        // Validate that the caller is an expected factory by checking it has code
+        // This prevents direct EOA deployment
+        uint256 factoryCodeSize;
+        assembly {
+            factoryCodeSize := extcodesize(caller())
+        }
+        require(factoryCodeSize > 0, "PiePay can only be deployed by a factory contract");
+        
         projectLead = _projectLead;
         payrollManager = _payrollManager;
         paymentToken = IERC20(_paymentToken);
@@ -201,7 +222,7 @@ contract PiePay is ReentrancyGuard {
             _whitelistContributor(_initialContributors[i]);
         }
         
-        emit ProjectInitialized(_projectName, _projectDescription, msg.sender);
+        emit ProjectInitialized(_projectName, _projectDescription, factory);
     }
 
     // ============ WHITELIST MANAGEMENT ============
@@ -714,5 +735,15 @@ contract PiePay is ReentrancyGuard {
     
     function _checkWhitelistedContributor() internal view {
         require(whitelistedContributors[msg.sender], "Not a whitelisted contributor");
+    }
+
+    // ============ FACTORY VALIDATION ============
+    
+    /**
+     * @notice Returns the factory contract address that deployed this PiePay instance
+     * @return The factory contract address
+     */
+    function getFactory() external view returns (address) {
+        return factory;
     }
 }
