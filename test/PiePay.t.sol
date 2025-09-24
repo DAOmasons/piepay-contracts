@@ -175,12 +175,14 @@ abstract contract PiePayTest is Test {
         assertEq(piePay.pToDMultiplier(), 15000); // 1.5x default
         assertEq(piePay.pToCMultiplier(), 3000);  // 0.3x default
         assertEq(piePay.dToCMultiplier(), 2000);  // 0.2x default
+        assertTrue(piePay.whitelistedContributors(projectLead));
+        assertTrue(piePay.whitelistedContributors(payrollManager));
         assertTrue(piePay.whitelistedContributors(contributor1));
         assertTrue(piePay.whitelistedContributors(contributor2));
         assertTrue(piePay.whitelistedContributors(contributor3));
         assertTrue(piePay.whitelistedContributors(contributor4));
         assertTrue(piePay.whitelistedContributors(contributor5));
-        assertEq(piePay.getContributorCount(), 5);
+        assertEq(piePay.getContributorCount(), 7);
     }
 
     function testInitializationEmitsEvent() public {
@@ -216,7 +218,7 @@ abstract contract PiePayTest is Test {
     function testWhitelistContributor() public {
         address newContrib = makeAddr("newContrib");
         assertFalse(piePay.whitelistedContributors(newContrib));
-        assertEq(piePay.getContributorCount(), 5);
+        assertEq(piePay.getContributorCount(), 7);
         
         vm.expectEmit(true, true, false, true);
         emit ContributorWhitelisted(projectLead, newContrib);
@@ -225,7 +227,7 @@ abstract contract PiePayTest is Test {
         piePay.whitelistContributor(newContrib);
         
         assertTrue(piePay.whitelistedContributors(newContrib));
-        assertEq(piePay.getContributorCount(), 6);
+        assertEq(piePay.getContributorCount(), 8);
     }
 
     function testWhitelistContributorAlreadyWhitelisted() public {
@@ -255,7 +257,7 @@ abstract contract PiePayTest is Test {
         
         assertFalse(piePay.whitelistedContributors(contributor1));
         // Contributor count should remain same (for historical tracking)
-        assertEq(piePay.getContributorCount(), 5);
+        assertEq(piePay.getContributorCount(), 7);
     }
 
     function testRemoveContributorNotWhitelisted() public {
@@ -1790,7 +1792,7 @@ abstract contract PiePayTest is Test {
             address(coin)
         );
         
-        assertEq(largePiePay.getContributorCount(), 100);
+        assertEq(largePiePay.getContributorCount(), 102);
         for (uint i = 0; i < 100; i++) {
             assertTrue(largePiePay.whitelistedContributors(largeContributors[i]));
         }

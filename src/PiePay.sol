@@ -216,7 +216,13 @@ contract PiePay is ReentrancyGuard {
         payrollManager = _payrollManager;
         paymentToken = IERC20(_paymentToken);
         paymentTokenDecimals = IERC20Metadata(_paymentToken).decimals();
-        
+
+        // Auto-whitelist project lead and payroll manager
+        _whitelistContributor(_projectLead);
+        if (_payrollManager != _projectLead) {
+            _whitelistContributor(_payrollManager);
+        }
+
         // Whitelist initial contributors
         for (uint256 i = 0; i < _initialContributors.length; i++) {
             _whitelistContributor(_initialContributors[i]);
