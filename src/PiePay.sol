@@ -32,7 +32,7 @@ contract PiePay is ReentrancyGuard {
     address public payrollManager; // This too
     
     // Independent conversion multipliers (basis points: 10000 = 1.0x)
-    uint16 public pToDMultiplier = 15000; // P→D: 1.5x (50% bonus for risk)
+    uint16 public pToDMultiplier = 15000; // P→D conversions get 1.5x (50% bonus for risk)
     uint16 public pToCMultiplier = 3000;  // P→C: 0.3x (need ~3.33 P-Units per C-Unit)
     uint16 public dToCMultiplier = 2000;  // D→C: 0.2x (need 5 D-Units per C-Unit)
     
@@ -66,7 +66,7 @@ contract PiePay is ReentrancyGuard {
     }
 
     // ============ NEW STRUCTS FOR PAYOUT LOGIC ============
-    
+
     struct PayoutState {
         uint256 totalUnits;
         uint256 actualDistributionAmount;
@@ -75,6 +75,44 @@ contract PiePay is ReentrancyGuard {
         uint256 firstHolderIndex;
         uint256 recipientCount;
     }
+
+    // ============ PAYOUT CONFIGURATION ============
+
+    struct PayoutConfig {
+        uint16 pRatio;      // Basis points for P-Units (e.g., 7000 = 70%)
+        uint16 dRatio;      // Basis points for D-Units (e.g., 2000 = 20%)
+        uint16 cRatio;      // Basis points for C-Units (e.g., 1000 = 10%)
+        bool isLocked;      // If true, ratios cannot be changed
+        bool isConfigured;  // If true, ratios have been set at least once
+        bool waterfallEnabled;  // If true, overflow cascades P→D→C; if false, excess stays in pool
+    }
+
+    struct ContributorPreview {
+        address contributor;
+        uint256 pPayout;
+        uint256 dPayout;
+        uint256 cPayout;
+        uint256 totalPayout;
+        uint256 pUnitsAfter;  // Remaining P-Units after payout
+        uint256 dUnitsAfter;  // Remaining D-Units after payout
+        uint256 cUnitsAfter;  // C-Units after (unchanged)
+    }
+
+    struct PayoutPreview {
+        ContributorPreview[] distributions;
+        uint256 pAllocated;    // Initial P allocation
+        uint256 pUsed;         // Actually used for P
+        uint256 pOverflow;     // Overflow to D
+        uint256 dAllocated;    // D allocation + P overflow
+        uint256 dUsed;         // Actually used for D
+        uint256 dOverflow;     // Overflow to C
+        uint256 cAllocated;    // C allocation + D overflow
+        uint256 cUsed;         // Actually used for C
+        bool pFullyPaid;       // All P-Units zeroed out?
+        bool dFullyPaid;       // All D-Units zeroed out?
+    }
+
+    PayoutConfig public payoutConfig;
     
 
     // ============ EVENTS ============
@@ -93,6 +131,10 @@ contract PiePay is ReentrancyGuard {
     event TotalUnitsUpdated(UnitType indexed unitType, uint256 newTotal);
     event ConversionMultipliersUpdated(address indexed executor, uint16 pToDMultiplier, uint16 pToCMultiplier, uint16 dToCMultiplier);
     event UnitCapacityUpdated(address indexed executor, UnitType indexed unitType, uint256 newCapacity);
+    event PayoutRatiosUpdated(address indexed executor, uint16 pRatio, uint16 dRatio, uint16 cRatio, bool waterfallEnabled);
+    event PayoutConfigLocked(address indexed executor);
+    event PayoutConfigUnlocked(address indexed executor);
+    event ConfiguredPayoutExecuted(address indexed executor, uint256 totalAmount, uint256 pAmount, uint256 dAmount, uint256 cAmount);
 
     // ============ TOTAL UNITS TRACKING ============
     
@@ -217,6 +259,10 @@ contract PiePay is ReentrancyGuard {
         paymentToken = IERC20(_paymentToken);
         paymentTokenDecimals = IERC20Metadata(_paymentToken).decimals();
 
+        // Emit events for role assignments
+        emit ProjectLeadUpdated(msg.sender, _projectLead);
+        emit PayrollManagerUpdated(msg.sender, _payrollManager);
+
         // Auto-whitelist project lead and payroll manager
         _whitelistContributor(_projectLead);
         if (_payrollManager != _projectLead) {
@@ -229,6 +275,20 @@ contract PiePay is ReentrancyGuard {
         }
         
         emit ProjectInitialized(_projectName, _projectDescription, factory);
+
+        // Set default payout configuration: 100% to P-Units with waterfall enabled
+        payoutConfig = PayoutConfig({
+            pRatio: 10000,
+            dRatio: 0,
+            cRatio: 0,
+            isLocked: false,
+            isConfigured: true,
+            waterfallEnabled: true
+        });
+
+        // Emit initial state events so indexers/frontends capture defaults
+        emit PayoutRatiosUpdated(_projectLead, 10000, 0, 0, true);
+        emit ConversionMultipliersUpdated(_projectLead, pToDMultiplier, pToCMultiplier, dToCMultiplier);
     }
 
     // ============ WHITELIST MANAGEMENT ============
@@ -293,15 +353,8 @@ contract PiePay is ReentrancyGuard {
         require(contribution.status == ContributionStatus.Pending, "Contribution already processed");
         
         if (_approved) {
-            // Calculate units to award - only D-Units get multiplier
-            uint256 unitsAwarded;
-            if (contribution.unitType == UnitType.Debt) {
-                require(contribution.unitsRequested <= type(uint256).max / pToDMultiplier, "Multiplier overflow");
-                unitsAwarded = (contribution.unitsRequested * pToDMultiplier) / 10000;
-            } else {
-                // P-Units and C-Units: no multiplier applied
-                unitsAwarded = contribution.unitsRequested;
-            }
+            // Calculate units to award - direct approvals mint exactly the requested amount
+            uint256 unitsAwarded = contribution.unitsRequested;
             
             // Check capacity constraints for D-Units and C-Units
             uint8 unitTypeIndex = uint8(contribution.unitType);
@@ -425,6 +478,13 @@ contract PiePay is ReentrancyGuard {
         unitBalances[msg.sender][fromIndex] -= fromAmount;
         uint256 previousToBalance = unitBalances[msg.sender][toIndex];
         unitBalances[msg.sender][toIndex] += toAmount;
+
+        // Release capacity consumed by the source unit type when applicable (D-Units or C-Units)
+        if (fromIndex > 0) {
+            // fromAmount is expressed in internal precision (same as unitTypeAllocated)
+            require(unitTypeAllocated[fromIndex] >= fromAmount, "Unit allocation underflow");
+            unitTypeAllocated[fromIndex] -= fromAmount;
+        }
         
         // Update totals
         _updateTotalUnits(fromType, -int256(fromAmount));
@@ -600,30 +660,139 @@ contract PiePay is ReentrancyGuard {
     function fundPayroll(uint256 _amount) external onlyPayrollManager {
         require(_amount > 0, "Amount must be greater than 0");
         require(_amount <= type(uint128).max, "Amount exceeds maximum safe value");
-        
+
         paymentToken.safeTransferFrom(msg.sender, address(this), _amount);
         payrollPool += _amount;
-        
+
         emit PayrollFunded(msg.sender, _amount);
+    }
+
+    /**
+     * @notice Execute a payout using the configured ratios with waterfall logic
+     * @param totalAmount Total amount to distribute across all unit types
+     */
+    function executeConfiguredPayout(uint256 totalAmount) external onlyPayrollManager nonReentrant {
+        require(payoutConfig.isConfigured, "Payout config not set");
+        require(totalAmount > 0, "Distribution amount must be greater than 0");
+        require(totalAmount <= payrollPool, "Distribution amount exceeds available funds");
+        require(paymentToken.balanceOf(address(this)) >= totalAmount, "Insufficient token balance");
+
+        // Calculate initial allocations based on ratios
+        uint256 pAllocated = (totalAmount * payoutConfig.pRatio) / 10000;
+        uint256 dAllocated = (totalAmount * payoutConfig.dRatio) / 10000;
+        uint256 cAllocated = (totalAmount * payoutConfig.cRatio) / 10000;
+
+        // Get total outstanding units
+        uint256 totalPUnits = totalUnitsOutstanding[uint8(UnitType.Profit)];
+        uint256 totalDUnits = totalUnitsOutstanding[uint8(UnitType.Debt)];
+        uint256 totalCUnits = totalUnitsOutstanding[uint8(UnitType.Capital)];
+
+        // Execute payout logic for P-Units
+        uint256 pUsed = 0;
+        uint256 pOverflow = 0;
+        if (totalPUnits > 0) {
+            if (pAllocated >= totalPUnits) {
+                // Fully pay out P-Units
+                pUsed = totalPUnits;
+                // Only cascade overflow if waterfall is enabled
+                pOverflow = payoutConfig.waterfallEnabled ? (pAllocated - totalPUnits) : 0;
+            } else {
+                // Partial payout
+                pUsed = pAllocated;
+                pOverflow = 0;
+            }
+        } else {
+            // No P-Units exist
+            // Only cascade allocation if waterfall is enabled
+            pOverflow = payoutConfig.waterfallEnabled ? pAllocated : 0;
+        }
+
+        // Execute payout logic for D-Units (with P overflow if waterfall enabled)
+        dAllocated += pOverflow;
+        uint256 dUsed = 0;
+        uint256 dOverflow = 0;
+        if (totalDUnits > 0) {
+            if (dAllocated >= totalDUnits) {
+                // Fully pay out D-Units
+                dUsed = totalDUnits;
+                // Only cascade overflow if waterfall is enabled
+                dOverflow = payoutConfig.waterfallEnabled ? (dAllocated - totalDUnits) : 0;
+            } else {
+                // Partial payout
+                dUsed = dAllocated;
+                dOverflow = 0;
+            }
+        } else {
+            // No D-Units exist
+            // Only cascade allocation if waterfall is enabled
+            dOverflow = payoutConfig.waterfallEnabled ? dAllocated : 0;
+        }
+
+        // Execute C-Units payout (with D overflow if waterfall enabled)
+        cAllocated += dOverflow;
+        uint256 cUsed = 0;
+        if (totalCUnits > 0) {
+            // C-Units persist (don't decrement), so they can receive full allocation
+            cUsed = cAllocated;
+        }
+        // If no C-Units, cUsed stays 0 and funds remain in payroll pool
+
+        // Execute the three payouts if amounts are > 0
+        if (pUsed > 0) {
+            _executeSingleUnitPayout(UnitType.Profit, pUsed);
+        }
+
+        if (dUsed > 0) {
+            _executeSingleUnitPayout(UnitType.Debt, dUsed);
+        }
+
+        if (cUsed > 0) {
+            _executeSingleUnitPayout(UnitType.Capital, cUsed);
+        }
+
+        // Update payroll pool - only deduct what was actually distributed
+        // If overflow has nowhere to go, it stays in the pool
+        uint256 actuallyDistributed = pUsed + dUsed + cUsed;
+        payrollPool -= actuallyDistributed;
+
+        emit ConfiguredPayoutExecuted(msg.sender, totalAmount, pUsed, dUsed, cUsed);
+    }
+
+    /**
+     * @notice Internal function to execute payout for a single unit type
+     * @param _unitType The type of units to pay out
+     * @param _amount The amount to distribute
+     */
+    function _executeSingleUnitPayout(UnitType _unitType, uint256 _amount) private {
+        address[] memory holders = unitHolders[uint8(_unitType)];
+        if (holders.length == 0) return;
+
+        PayoutState memory state = _initializePayoutState(_unitType, _amount, holders);
+        uint256[] memory distributions = _calculateDistributions(state, holders, _unitType);
+        _executeTransfers(distributions, holders, state);
+
+        emit UnitsDistributed(msg.sender, _unitType, state.actualDistributionAmount, state.recipientCount);
     }
 
     // ============ ADMINISTRATIVE FUNCTIONS ============
     
     function setConversionMultipliers(
         uint16 _pToDMultiplier,
-        uint16 _pToCMultiplier, 
         uint16 _dToCMultiplier
     ) external onlyPayrollManager {
-        require(_pToDMultiplier > 0 && _pToCMultiplier > 0 && _dToCMultiplier > 0, "Multipliers must be > 0");
+        require(_pToDMultiplier > 0 && _dToCMultiplier > 0, "Multipliers must be > 0");
         require(_pToDMultiplier <= type(uint16).max, "P to D multiplier too high");
-        require(_pToCMultiplier <= type(uint16).max, "P to C multiplier too high");
         require(_dToCMultiplier <= type(uint16).max, "D to C multiplier too high");
+
+        uint256 derived = (uint256(_pToDMultiplier) * uint256(_dToCMultiplier)) / 10000;
+        require(derived > 0 && derived <= type(uint16).max, "Derived P to C multiplier invalid");
+        uint16 computedPToC = uint16(derived);
         
         pToDMultiplier = _pToDMultiplier;
-        pToCMultiplier = _pToCMultiplier;
+        pToCMultiplier = computedPToC;
         dToCMultiplier = _dToCMultiplier;
         
-        emit ConversionMultipliersUpdated(msg.sender, _pToDMultiplier, _pToCMultiplier, _dToCMultiplier);
+        emit ConversionMultipliersUpdated(msg.sender, _pToDMultiplier, computedPToC, _dToCMultiplier);
     }
     
     function setUnitCapacity(UnitType unitType, uint256 newCapacity) external onlyPayrollManager {
@@ -651,6 +820,54 @@ contract PiePay is ReentrancyGuard {
         require(_newManager != payrollManager, "New manager same as current manager");
         payrollManager = _newManager;
         emit PayrollManagerUpdated(msg.sender, _newManager);
+    }
+
+    // ============ PAYOUT CONFIGURATION FUNCTIONS ============
+
+    /**
+     * @notice Set payout ratio configuration for P, D, and C units
+     * @param _pRatio Basis points for P-Units (0-10000)
+     * @param _dRatio Basis points for D-Units (0-10000)
+     * @param _cRatio Basis points for C-Units (0-10000)
+     * @param _waterfallEnabled If true, overflow cascades P→D→C; if false, excess stays in pool
+     */
+    function setPayoutRatios(
+        uint16 _pRatio,
+        uint16 _dRatio,
+        uint16 _cRatio,
+        bool _waterfallEnabled
+    ) external onlyPayrollManager {
+        require(!payoutConfig.isLocked, "Payout config is locked");
+        require(_pRatio + _dRatio + _cRatio == 10000, "Ratios must sum to 10000 (100%)");
+
+        payoutConfig.pRatio = _pRatio;
+        payoutConfig.dRatio = _dRatio;
+        payoutConfig.cRatio = _cRatio;
+        payoutConfig.waterfallEnabled = _waterfallEnabled;
+        payoutConfig.isConfigured = true;
+
+        emit PayoutRatiosUpdated(msg.sender, _pRatio, _dRatio, _cRatio, _waterfallEnabled);
+    }
+
+    /**
+     * @notice Lock the payout configuration to prevent further changes
+     */
+    function lockPayoutConfig() external onlyPayrollManager {
+        require(payoutConfig.isConfigured, "Must configure ratios before locking");
+        require(!payoutConfig.isLocked, "Already locked");
+
+        payoutConfig.isLocked = true;
+        emit PayoutConfigLocked(msg.sender);
+    }
+
+    /**
+     * @notice Unlock the payout configuration to allow changes
+     */
+    function unlockPayoutConfig() external onlyPayrollManager {
+        require(payoutConfig.isLocked, "Already unlocked");
+
+        payoutConfig.isLocked = false;
+        emit PayoutConfigUnlocked(msg.sender);
     }
 
     // ============ VIEW FUNCTIONS ============
@@ -685,6 +902,177 @@ contract PiePay is ReentrancyGuard {
     
     function getContributorCount() external view returns (uint256) {
         return contributorList.length;
+    }
+
+    /**
+     * @notice Preview what a configured payout would look like
+     * @param totalAmount Total amount to distribute
+     * @return preview Detailed breakdown of how the payout would be distributed
+     */
+    function previewPayout(uint256 totalAmount) external view returns (PayoutPreview memory preview) {
+        require(payoutConfig.isConfigured, "Payout config not set");
+        require(totalAmount > 0, "Amount must be greater than 0");
+        require(totalAmount <= payrollPool, "Amount exceeds payroll pool");
+
+        // Calculate initial allocations
+        preview.pAllocated = (totalAmount * payoutConfig.pRatio) / 10000;
+        preview.dAllocated = (totalAmount * payoutConfig.dRatio) / 10000;
+        preview.cAllocated = (totalAmount * payoutConfig.cRatio) / 10000;
+
+        // Get total outstanding units
+        uint256 totalPUnits = totalUnitsOutstanding[uint8(UnitType.Profit)];
+        uint256 totalDUnits = totalUnitsOutstanding[uint8(UnitType.Debt)];
+        uint256 totalCUnits = totalUnitsOutstanding[uint8(UnitType.Capital)];
+
+        // Process P-Units
+        uint256 pAvailable = preview.pAllocated;
+        if (totalPUnits > 0) {
+            if (pAvailable >= totalPUnits) {
+                // P-Units will be fully paid out
+                preview.pUsed = totalPUnits;
+                // Only cascade overflow if waterfall is enabled
+                preview.pOverflow = payoutConfig.waterfallEnabled ? (pAvailable - totalPUnits) : 0;
+                preview.pFullyPaid = true;
+            } else {
+                // Partial P-Units payout
+                preview.pUsed = pAvailable;
+                preview.pOverflow = 0;
+                preview.pFullyPaid = false;
+            }
+        } else {
+            // No P-Units exist
+            preview.pUsed = 0;
+            // Only cascade if waterfall is enabled
+            preview.pOverflow = payoutConfig.waterfallEnabled ? pAvailable : 0;
+            preview.pFullyPaid = true;
+        }
+
+        // Process D-Units (includes P overflow if waterfall enabled)
+        preview.dAllocated += preview.pOverflow;
+        uint256 dAvailable = preview.dAllocated;
+        if (totalDUnits > 0) {
+            if (dAvailable >= totalDUnits) {
+                // D-Units will be fully paid out
+                preview.dUsed = totalDUnits;
+                // Only cascade overflow if waterfall is enabled
+                preview.dOverflow = payoutConfig.waterfallEnabled ? (dAvailable - totalDUnits) : 0;
+                preview.dFullyPaid = true;
+            } else {
+                // Partial D-Units payout
+                preview.dUsed = dAvailable;
+                preview.dOverflow = 0;
+                preview.dFullyPaid = false;
+            }
+        } else {
+            // No D-Units exist
+            preview.dUsed = 0;
+            // Only cascade if waterfall is enabled
+            preview.dOverflow = payoutConfig.waterfallEnabled ? dAvailable : 0;
+            preview.dFullyPaid = true;
+        }
+
+        // Process C-Units (includes D overflow if waterfall enabled)
+        preview.cAllocated += preview.dOverflow;
+        if (totalCUnits > 0) {
+            // C-Units persist (don't decrement), so they can receive full allocation
+            preview.cUsed = preview.cAllocated;
+        } else {
+            preview.cUsed = 0;
+        }
+
+        // Build per-contributor distributions
+        preview.distributions = _buildContributorPreviews(
+            preview.pUsed,
+            preview.dUsed,
+            preview.cUsed,
+            totalPUnits,
+            totalDUnits,
+            totalCUnits
+        );
+    }
+
+    /**
+     * @notice Build detailed per-contributor preview data
+     */
+    function _buildContributorPreviews(
+        uint256 pAmount,
+        uint256 dAmount,
+        uint256 cAmount,
+        uint256 totalPUnits,
+        uint256 totalDUnits,
+        uint256 totalCUnits
+    ) private view returns (ContributorPreview[] memory) {
+        // Count total unique contributors across all unit types
+        ContributorPreview[] memory tempPreviews = new ContributorPreview[](contributorList.length);
+        uint256 count = 0;
+
+        // Process all contributors
+        for (uint256 i = 0; i < contributorList.length; i++) {
+            ContributorPreview memory preview = _calculateSingleContributorPreview(
+                contributorList[i],
+                pAmount,
+                dAmount,
+                cAmount,
+                totalPUnits,
+                totalDUnits,
+                totalCUnits
+            );
+
+            // Skip if contributor has no units
+            if (preview.totalPayout == 0) {
+                continue;
+            }
+
+            tempPreviews[count] = preview;
+            count++;
+        }
+
+        // Resize array to actual count
+        ContributorPreview[] memory finalPreviews = new ContributorPreview[](count);
+        for (uint256 i = 0; i < count; i++) {
+            finalPreviews[i] = tempPreviews[i];
+        }
+
+        return finalPreviews;
+    }
+
+    /**
+     * @notice Calculate preview for a single contributor
+     */
+    function _calculateSingleContributorPreview(
+        address contributor,
+        uint256 pAmount,
+        uint256 dAmount,
+        uint256 cAmount,
+        uint256 totalPUnits,
+        uint256 totalDUnits,
+        uint256 totalCUnits
+    ) private view returns (ContributorPreview memory preview) {
+        preview.contributor = contributor;
+
+        uint256 pUnits = unitBalances[contributor][uint8(UnitType.Profit)];
+        uint256 dUnits = unitBalances[contributor][uint8(UnitType.Debt)];
+        uint256 cUnits = unitBalances[contributor][uint8(UnitType.Capital)];
+
+        // Calculate payouts (1:1 ratio)
+        if (totalPUnits > 0 && pUnits > 0) {
+            preview.pPayout = (pUnits * pAmount) / totalPUnits;
+        }
+
+        if (totalDUnits > 0 && dUnits > 0) {
+            preview.dPayout = (dUnits * dAmount) / totalDUnits;
+        }
+
+        if (totalCUnits > 0 && cUnits > 0) {
+            preview.cPayout = (cUnits * cAmount) / totalCUnits;
+        }
+
+        preview.totalPayout = preview.pPayout + preview.dPayout + preview.cPayout;
+
+        // Calculate remaining units (P and D decrement, C persists)
+        preview.pUnitsAfter = fromInternalUnits(pUnits > preview.pPayout ? pUnits - preview.pPayout : 0);
+        preview.dUnitsAfter = fromInternalUnits(dUnits > preview.dPayout ? dUnits - preview.dPayout : 0);
+        preview.cUnitsAfter = fromInternalUnits(cUnits);
     }
 
     // ============ INTERNAL HELPER FUNCTIONS ============

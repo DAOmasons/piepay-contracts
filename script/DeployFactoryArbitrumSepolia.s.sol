@@ -24,9 +24,9 @@ contract DeployFactoryArbitrumSepolia is Script {
         console.log("PiePayFactory deployed at:", address(factory));
         
         // Create a sample project to test
-        address[] memory initialContributors = new address[](1);
-        initialContributors[0] = deployer;
-        
+        // Note: project lead and payroll manager are auto-whitelisted, so don't include them in initialContributors
+        address[] memory initialContributors = new address[](0);
+
         PiePayFactory.ProjectParams memory params = PiePayFactory.ProjectParams({
             projectName: "Demo PiePay Project",
             projectDescription: "A demonstration project for PiePay profit sharing system",

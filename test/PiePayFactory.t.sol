@@ -30,7 +30,8 @@ contract PiePayFactoryTest is Test {
     
     function testInitialState() public {
         assertEq(factory.projectCounter(), 1);
-        assertEq(factory.getTotalProjects(), 0);
+        // getTotalProjects() removed to reduce contract size
+        // assertEq(factory.getTotalProjects(), 0);
     }
     
     function testCreateProject() public {
@@ -56,21 +57,13 @@ contract PiePayFactoryTest is Test {
         
         // Check factory state
         assertEq(factory.projectCounter(), 2);
-        assertEq(factory.getTotalProjects(), 1);
+        // getTotalProjects() and getProjectInfo() removed to reduce contract size
+        // assertEq(factory.getTotalProjects(), 1);
         assertEq(factory.getProject(projectId), projectAddress);
         assertEq(factory.getProjectId(projectAddress), projectId);
-        
-        // Check project info
-        PiePayFactory.ProjectInfo memory info = factory.getProjectInfo(projectId);
-        assertEq(info.projectId, projectId);
-        assertEq(info.projectAddress, projectAddress);
-        assertEq(info.projectName, "Test Project");
-        assertEq(info.projectDescription, "A test project for PiePay");
-        assertEq(info.projectLead, projectLead);
-        assertEq(info.payrollManager, payrollManager);
-        assertEq(info.paymentToken, address(mockUSDC));
-        assertEq(info.creator, deployer);
-        assertEq(info.createdAt, block.timestamp);
+
+        // Project info functionality removed to reduce contract size
+        // Check data from events instead
         
         // Check that PiePay contract was properly initialized
         PiePay piePayContract = PiePay(projectAddress);
@@ -149,7 +142,8 @@ contract PiePayFactoryTest is Test {
         assertEq(projectId1, 1);
         assertEq(projectId2, 2);
         assertNotEq(projectAddress1, projectAddress2);
-        assertEq(factory.getTotalProjects(), 2);
+        // getTotalProjects() removed to reduce contract size
+        // assertEq(factory.getTotalProjects(), 2);
         
         // Check projects by creator
         uint256[] memory deployerProjects = factory.getProjectsByCreator(deployer);
@@ -161,58 +155,11 @@ contract PiePayFactoryTest is Test {
         assertEq(otherCreatorProjects[0], projectId2);
     }
     
-    function testGetProjectsBatch() public {
-        address[] memory initialContributors = new address[](0);
-        
-        // Create 3 projects
-        for (uint i = 0; i < 3; i++) {
-            PiePayFactory.ProjectParams memory params = PiePayFactory.ProjectParams({
-                projectName: string(abi.encodePacked("Project ", vm.toString(i + 1))),
-                projectDescription: "Test project",
-                projectLead: projectLead,
-                payrollManager: payrollManager,
-                initialContributors: initialContributors,
-                paymentToken: address(mockUSDC)
-            });
-            
-            vm.prank(deployer);
-            factory.createProject(params);
-        }
-        
-        // Test batch retrieval
-        (address[] memory batch1, bool hasMore1) = factory.getProjectsBatch(0, 2);
-        assertEq(batch1.length, 2);
-        assertTrue(hasMore1);
-        
-        (address[] memory batch2, bool hasMore2) = factory.getProjectsBatch(2, 2);
-        assertEq(batch2.length, 1);
-        assertFalse(hasMore2);
-    }
-    
-    function testUpdateProjectMetadata() public {
-        address[] memory initialContributors = new address[](0);
-        
-        PiePayFactory.ProjectParams memory params = PiePayFactory.ProjectParams({
-            projectName: "Original Name",
-            projectDescription: "Original Description",
-            projectLead: projectLead,
-            payrollManager: payrollManager,
-            initialContributors: initialContributors,
-            paymentToken: address(mockUSDC)
-        });
-        
-        vm.prank(deployer);
-        (uint256 projectId, ) = factory.createProject(params);
-        
-        // Update metadata as project lead
-        vm.prank(projectLead);
-        factory.updateProjectMetadata(projectId, "Updated Name", "Updated Description");
-        
-        // Check updated info
-        PiePayFactory.ProjectInfo memory info = factory.getProjectInfo(projectId);
-        assertEq(info.projectName, "Updated Name");
-        assertEq(info.projectDescription, "Updated Description");
-    }
+    // getProjectsBatch() removed to reduce contract size - use indexer instead
+    // function testGetProjectsBatch() public { ... }
+
+    // updateProjectMetadata() and getProjectInfo() removed to reduce contract size
+    // function testUpdateProjectMetadata() public { ... }
     
     function test_RevertWhen_EmptyProjectName() public {
         address[] memory initialContributors = new address[](0);
@@ -232,26 +179,8 @@ contract PiePayFactoryTest is Test {
         factory.createProject(params);
     }
     
-    function test_RevertWhen_UnauthorizedMetadataUpdate() public {
-        address[] memory initialContributors = new address[](0);
-        
-        PiePayFactory.ProjectParams memory params = PiePayFactory.ProjectParams({
-            projectName: "Test Project",
-            projectDescription: "Test project",
-            projectLead: projectLead,
-            payrollManager: payrollManager,
-            initialContributors: initialContributors,
-            paymentToken: address(mockUSDC)
-        });
-        
-        vm.prank(deployer);
-        (uint256 projectId, ) = factory.createProject(params);
-        
-        // Try to update as non-project-lead
-        vm.expectRevert("Only project lead can update metadata");
-        vm.prank(deployer);
-        factory.updateProjectMetadata(projectId, "Updated Name", "Updated Description");
-    }
+    // updateProjectMetadata() removed to reduce contract size
+    // function test_RevertWhen_UnauthorizedMetadataUpdate() public { ... }
     
     function testIsValidProject() public {
         address[] memory initialContributors = new address[](0);
